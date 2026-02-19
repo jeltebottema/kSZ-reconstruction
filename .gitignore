@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Data files
+data/
+data_21cmfast/
+data_raghu/
+cache/
+
+# Plots and figures
+plots/
+plots_*/
+*.png
+*.jpg
+*.jpeg
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# IDL
+*.pro
+
+# OS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Keep plots_paper directory structure but ignore images
+!plots_paper/
+plots_paper/*.png
+plots_paper/*.jpg
+
+# Keep essential documentation
+!README.md
+!LICENSE
