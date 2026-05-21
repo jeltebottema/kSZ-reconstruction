@@ -1893,7 +1893,7 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
     gc.collect()
 
 
-def comoving_distance(z, H0=70, Om=0.3):
+def comoving_distance(z, H0=70, Om=0.27):
     """Compute comoving distance in Mpc/h."""
     c = 299792.458  # km/s
     integrand = lambda zp: 1.0 / np.sqrt(Om*(1+zp)**3 + (1-Om))
