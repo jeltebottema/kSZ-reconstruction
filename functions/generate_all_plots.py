@@ -115,7 +115,7 @@ def k_to_ell(k, z, littleh=0.7):
 # ============================================================================
 
 
-def compute_dtau_dz(z, n_e_factor=1.0, H0=70.0, Omega_b=0.045, Omega_m=0.27, Y_He=0.24):
+def compute_dtau_dz(z, n_e_factor=1.0, H0=70.0, Omega_b=0.044, Omega_m=0.27, Y_He=0.24):
     """
     Compute the differential Thomson optical depth dτ/dz at redshift z.
     
@@ -180,7 +180,7 @@ def compute_dtau_dz(z, n_e_factor=1.0, H0=70.0, Omega_b=0.045, Omega_m=0.27, Y_H
     return dtau_dz
 
 
-def compute_tau_0_to_z(z, H0=70.0, Omega_b=0.045, Omega_m=0.27, Y_He=0.24):
+def compute_tau_0_to_z(z, H0=70.0, Omega_b=0.044, Omega_m=0.27, Y_He=0.24):
     """
     Compute the Thomson optical depth from z=0 to redshift z,
     assuming the universe is fully ionized.
@@ -206,7 +206,7 @@ def compute_tau_0_to_z(z, H0=70.0, Omega_b=0.045, Omega_m=0.27, Y_He=0.24):
 TAU_0_6 = 0.0517
 
 
-def compute_tau_6_to_z(z, H0=70.0, Omega_b=0.045, Omega_m=0.27, Y_He=0.24):
+def compute_tau_6_to_z(z, H0=70.0, Omega_b=0.044, Omega_m=0.27, Y_He=0.24):
     """
     Compute the Thomson optical depth from z=6 to redshift z,
     assuming the universe is fully ionized.
@@ -555,7 +555,7 @@ def compute_ksz_maps(vz, xhi, den, z=None, physical_norm=False, use_optical_dept
             Mpc_to_cm = 3.085677581e24  # Mpc to cm
             
             H0 = 70.0  # km/s/Mpc
-            Omega_b = 0.045  # Baryon density parameter
+            Omega_b = 0.044  # Baryon density parameter
             Omega_m = 0.27
             Y_He = 0.24  # Helium mass fraction
             
