@@ -13,36 +13,53 @@ build/
 venv/
 env/
 
-# Data files
+# uv lockfile (commit if reproducible installs are wanted across machines; safer to commit)
+# uv.lock
+
+# Data files (large, kept local)
 data/
-data_21cmfast/
-data_raghu/
+data_*/
+**/data/
+**/data_*/
 cache/
 
-# Plots and figures
+# Plots and figures (regenerable, kept local)
 plots/
 plots_*/
+**/plots/
+**/plots_*/
 *.png
 *.jpg
 *.jpeg
 
+# But keep paper-figure PDFs (small, version them)
+!**/plots_paper/*.pdf
+
 # Notebooks checkpoints
 .ipynb_checkpoints/
-notebooks/.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
-# IDL
+# IDL / external code artifacts
 *.pro
+
+# Loose top-level scratch outputs
+/output.png
+/noise.png
+/target_vs_pred.png
+/train_progress.png
+
+# Large archive zips (e.g. noisy_reconstruction.zip)
+*.zip
+
+# Local Claude Code orientation files — not shared
+**/CLAUDE.md
+.claude/
 
 # OS
 .DS_Store
 *.swp
 *.swo
 *~
-
-# Keep plots_paper directory structure but ignore images
-!plots_paper/
-plots_paper/*.png
-plots_paper/*.jpg
 
 # Keep essential documentation
 !README.md

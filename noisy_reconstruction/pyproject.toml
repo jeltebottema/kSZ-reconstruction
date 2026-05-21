@@ -1,0 +1,13 @@
+[project]
+name = "noisy-reconstruction"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "21cmsense",
+    "tuesday-eor",
+]
+
+[tool.uv.sources]
+21cmsense = { git = "https://github.com/rasg-affiliates/21cmSense", rev = "fast-hist" }
+tuesday-eor = { git = "https://github.com/21cmfast/tuesday", rev = "coeval-obs" }

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual env (uv)
+.venv/
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local Claude orientation — not shared
+CLAUDE.md
+**/CLAUDE.md

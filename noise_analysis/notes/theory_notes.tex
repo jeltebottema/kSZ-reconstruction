@@ -1,0 +1,309 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{physics}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{parskip}
+
+\newcommand{\kperp}{k_\perp}
+\newcommand{\kpar}{k_\parallel}
+\newcommand{\Tsys}{T_\mathrm{sys}}
+\newcommand{\Pnoise}{P_\mathrm{N}}
+\newcommand{\Psignal}{P_\mathrm{signal}}
+\newcommand{\fnoise}{f_\mathrm{noise}}
+\newcommand{\ffore}{f_\mathrm{fore}}
+\newcommand{\nbl}{n_\mathrm{bl}}
+
+\title{Theory: Thermal Noise in 21\,cm Interferometry\\[4pt]
+\large From baselines to the 2D noise filter}
+\author{Meeting notes}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{What does an interferometer measure?}
+%======================================================================
+
+Each pair of antennas (a \emph{baseline} with vector $\vb{b}$) measures one complex visibility:
+\begin{equation}
+    V(u,v,\nu) = \int I(l,m,\nu)\, B(l,m,\nu)\, e^{-2\pi i(ul + vm)}\, \dd{l}\,\dd{m}
+\end{equation}
+where $I$ is the sky brightness, $B$ is the primary beam, and $(l,m)$ are direction cosines on the sky.
+
+The baseline coordinates in units of wavelengths are:
+\begin{equation}
+    u = \frac{b_\mathrm{east}}{\lambda}, \qquad
+    v = \frac{b_\mathrm{north}}{\lambda}, \qquad
+    \lambda = \frac{c}{\nu}
+\end{equation}
+
+A baseline of length $d$ probes angular scale $\theta \sim \lambda/d$. The visibility $V(u,v)$ is one Fourier coefficient of the sky brightness.
+
+%======================================================================
+\section{From baseline to wavenumber}
+%======================================================================
+
+The observed 21\,cm frequency maps to redshift:
+\begin{equation}
+    \nu_\mathrm{obs} = \frac{\nu_{21}}{1+z}, \qquad \nu_{21} = 1420.405\;\mathrm{MHz}
+\end{equation}
+
+Two independent Fourier axes connect observables to cosmological wavenumbers:
+
+\paragraph{Transverse (angular $\to$ $\kperp$):}
+\begin{equation}
+    \kperp = \frac{2\pi\, u}{D_M(z)}
+\end{equation}
+where $D_M(z)$ is the comoving transverse distance (the paper calls this $X \equiv D_M$).
+
+\paragraph{Radial (frequency $\to$ $\kpar$):}
+\begin{equation}
+    \kpar = \frac{2\pi\, \eta}{Y}, \qquad
+    Y \equiv \frac{c\,(1+z)^2}{H(z)\,\nu_{21}} \quad [\mathrm{Mpc/MHz}]
+\end{equation}
+where $\eta$ is the Fourier dual of frequency (delay, in seconds).
+
+Key point: $\kperp$ is set by \emph{which baseline} you use; $\kpar$ is set by \emph{which frequency channel} you observe.
+
+%======================================================================
+\section{Thermal noise per visibility}
+%======================================================================
+
+Each visibility measurement has independent Gaussian thermal noise with RMS:
+\begin{equation}
+    \sigma_\mathrm{vis} = \frac{\Tsys}{\sqrt{2\,\Delta\nu\,t_\mathrm{int}}}
+\end{equation}
+where:
+\begin{itemize}
+    \item $\Tsys$: system temperature [K], dominated by galactic synchrotron at EoR frequencies
+    \item $\Delta\nu$: channel bandwidth [Hz]
+    \item $t_\mathrm{int}$: integration time per visibility [s]
+    \item Factor 2: two polarisations
+\end{itemize}
+
+The system temperature at EoR frequencies is modelled as (Eq.~19 of the paper):
+\begin{equation}
+    \Tsys(\nu) = 237 + 1.6\left(\frac{\nu}{300\;\mathrm{MHz}}\right)^{-5.23} \quad [\mathrm{K}]
+\end{equation}
+At $z=8$ ($\nu = 158$\,MHz): $\Tsys \approx 700$\,K.
+
+This noise is \textbf{independent} between different baselines and different frequency channels. This means the noise is \textbf{white} in $(u,v,\nu)$ space --- a crucial property.
+
+%======================================================================
+\section{From visibility noise to power spectrum noise}
+%======================================================================
+
+The thermal noise power spectrum $\Pnoise$ measures how much noise power there is per Fourier mode. For HERA, this is given by Eq.~14 of the paper (Parsons+ 2014 formalism):
+\begin{equation}\label{eq:pnoise}
+    \boxed{
+    \Pnoise(\kperp) = \frac{\Tsys^2\;\Omega_p^2/\Omega_{pp}\; X^2\, Y}{t_\mathrm{int}\; N_\mathrm{pol}\; \nbl(u)}
+    }
+\end{equation}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llr}
+\toprule
+Factor & Physical meaning & Value at $z=8$ \\
+\midrule
+$\Tsys^2$ & Noise amplitude squared & $(700\;\mathrm{K})^2$ \\
+$\Omega_p^2/\Omega_{pp}$ & Beam correction ($\approx 2\,\Omega_p$ for Gaussian) & $\sim 0.037$\,sr \\
+$X^2 = D_M^2$ & Angles $\to$ comoving Mpc$^2$ & $(6500\;\mathrm{Mpc})^2$ \\
+$Y$ & Frequency $\to$ comoving Mpc/MHz & $\sim 12$\,Mpc/MHz \\
+$t_\mathrm{int}$ & Integration time (more $\to$ less noise) & $200\;\mathrm{h}$ \\
+$N_\mathrm{pol}$ & Polarisations & 2 \\
+$\nbl(u)$ & Baseline density at this $u$ & varies with $\kperp$ \\
+\bottomrule
+\end{tabular}
+\caption{Factors in the HERA noise power spectrum.}
+\end{table}
+
+For SKA1-Low, the noise takes a slightly different form (Eq.~17, McQuinn+ 2006):
+\begin{equation}
+    \Pnoise^\mathrm{SKA}(\kperp) = \frac{\lambda^2\;\Tsys^2\; X^2\, Y}{t_\mathrm{int}\; \nbl(u)\; A_e}
+\end{equation}
+where $A_e$ is the effective collecting area per station.
+
+%======================================================================
+\section{Why $\Pnoise$ depends on $\kperp$ but NOT on $\kpar$}
+%======================================================================
+
+This is the single most important point for understanding the 2D filter:
+
+\begin{enumerate}
+    \item $\kperp$ is set by \emph{which baseline} you use $\to$ $\nbl(u)$ varies with baseline length $\to$ $\Pnoise$ varies with $\kperp$
+    \item $\kpar$ is set by \emph{frequency} $\to$ thermal noise is \textbf{white in frequency} (independent between channels) $\to$ after FFT to $\kpar$ space, the noise power is \textbf{flat}
+\end{enumerate}
+
+\begin{equation}
+    \Pnoise = \Pnoise(\kperp) \quad \text{--- independent of } \kpar
+\end{equation}
+
+This is why the 2D filter has \textbf{vertical band structure}: at a given $\kperp$, the filter value is the same for all $\kpar$ (outside the wedge).
+
+%======================================================================
+\section{The baseline density $\nbl(u)$}
+%======================================================================
+
+$\nbl(u)$ is the number of baseline pairs sampling a given $(u,v)$ annulus. It depends entirely on the antenna layout:
+
+\paragraph{HERA} (compact hexagonal, 350 dishes, 14\,m spacing):
+\begin{itemize}
+    \item Many short baselines (14, 28, 42\,m\ldots) $\to$ dense coverage at small $u$ (low $\kperp$)
+    \item Few long baselines $\to$ sparse at large $u$ (high $\kperp$)
+    \item $\nbl$ peaks at $u \sim 50\,\lambda$ ($\kperp \sim 0.05\;h\,\mathrm{Mpc}^{-1}$)
+\end{itemize}
+
+\paragraph{SKA-Low} (extended, 512 stations, up to 65\,km):
+\begin{itemize}
+    \item Few short baselines $\to$ sparse at small $u$ (low $\kperp$)
+    \item Many intermediate baselines $\to$ peak at $u \sim 300\,\lambda$
+    \item Result: noise suppresses \textbf{small-scale} (high $\kperp$) modes
+\end{itemize}
+
+This explains the key visual difference between HERA and SKA in the paper's Fig.~3: HERA's noise kills high $\kperp$ (right side dark), while SKA's noise kills low $\kperp$ (left side dark).
+
+%======================================================================
+\section{The Wiener noise filter}
+%======================================================================
+
+The optimal linear filter for extracting signal from noise is the Wiener filter (Eq.~13):
+\begin{equation}\label{eq:wiener}
+    \boxed{
+    \fnoise(\kperp) = \frac{\Psignal(k)}{\Psignal(k) + \Pnoise(\kperp)}
+    }
+\end{equation}
+
+Limiting cases:
+\begin{align}
+    \Psignal \gg \Pnoise &\implies \fnoise \to 1 \quad \text{(mode survives)} \\
+    \Psignal \ll \Pnoise &\implies \fnoise \to 0 \quad \text{(mode lost)} \\
+    \Psignal = \Pnoise &\implies \fnoise = 0.5 \quad \text{(crossover)}
+\end{align}
+
+Since $\Pnoise$ depends only on $\kperp$, the filter has the same value for all $\kpar$ at a given $\kperp$.
+
+Note: $\Psignal(k)$ can depend on $k = \sqrt{\kperp^2 + \kpar^2}$, so the filter is not \emph{perfectly} flat in $\kpar$ --- but the dominant variation is through $\kperp$ via $\nbl(u)$.
+
+%======================================================================
+\section{The foreground wedge}
+%======================================================================
+
+Bright astrophysical foregrounds (galactic synchrotron, point sources) are spectrally smooth and have power only at low $\kpar$. However, the interferometer's chromatic response (beam width $\propto \lambda/D$ changes with frequency) leaks foreground power into a wedge-shaped region in $(\kperp, \kpar)$ space.
+
+The wedge boundary (Eq.~12):
+\begin{equation}\label{eq:wedge}
+    \boxed{
+    \ffore(\kperp, \kpar) = \Theta\!\left(|\kpar| - m(z)\,\kperp\right)
+    }
+\end{equation}
+where $\Theta$ is the Heaviside step function and the slope is:
+\begin{equation}
+    m(z) = \frac{H(z)\,D_M(z)}{c\,(1+z)}
+\end{equation}
+
+At $z=8$: $m \approx 0.32$ (cosmological value). In practice, a more conservative slope $m = 1.0$ (the ``horizon limit'') is often used. The \texttt{tuesday} package uses $m=1.0$ by default.
+
+Modes \emph{inside} the wedge ($|\kpar| < m\,\kperp$) are contaminated and zeroed. The safe region outside is called the \textbf{EoR window}.
+
+%======================================================================
+\section{The combined 21\,cm filter}
+%======================================================================
+
+The total filter applied to the 21\,cm field (Eq.~18):
+\begin{equation}\label{eq:total}
+    \boxed{
+    f^{21\mathrm{cm}}(\kperp, \kpar) = \ffore(\kperp, \kpar) \times \fnoise(\kperp)
+    }
+\end{equation}
+
+Reading the 2D plot:
+\begin{itemize}
+    \item \textbf{Bottom-left triangle}: killed by wedge ($\ffore = 0$)
+    \item \textbf{Left column} (low $\kperp$, outside wedge): killed by noise for HERA (few short baselines at very small $u$), surviving for SKA
+    \item \textbf{Right column} (high $\kperp$, outside wedge): killed by noise for SKA (sparse long baselines), surviving for HERA's core
+    \item \textbf{Middle band}: the \textbf{EoR window} --- where signal survives both noise and foregrounds
+\end{itemize}
+
+%======================================================================
+\section{Computing $\Pnoise$: three approaches}
+%======================================================================
+
+\subsection{A. Paper-analytical (Eq.~\ref{eq:pnoise})}
+
+Use the formula directly with an analytic approximation for $\nbl(u)$. The implementation in \texttt{fig3\_filter.py} uses a log-normal fit tuned to match the paper's Fig.~3.
+
+\textbf{Pros:} no simulation needed, fast, perfectly smooth, reproducible.\\
+\textbf{Cons:} $\nbl(u)$ is approximate (not the real antenna positions).
+
+\subsection{B. Tuesday-analytical}
+
+Use \texttt{compute\_thermal\_rms\_uvgrid()} from the \texttt{tuesday} package, which computes $\sigma_\mathrm{noise}$ per UV cell from the actual HERA antenna positions and observation parameters. Then $\Pnoise = \sigma^2$.
+
+\textbf{Pros:} uses real antenna layout, accounts for rotation synthesis.\\
+\textbf{Cons:} only non-zero where baselines exist (sparse UV grid), requires careful binning.
+
+\subsection{C. Noise realizations}
+
+Pass a zero-signal box through \texttt{observe\_coeval} $\to$ pure noise output. Compute its power spectrum. Optionally average over $N$ realizations.
+
+\textbf{Pros:} includes all effects (beam, gridding, interpolation).\\
+\textbf{Cons:} single realization has variance $\sim 1/N_\mathrm{modes}$ per bin.
+
+The variance of the power spectrum estimate in a bin:
+\begin{equation}
+    \frac{\sigma(P)}{P} \sim \frac{1}{\sqrt{N_\mathrm{modes}}}
+\end{equation}
+\begin{itemize}
+    \item At \textbf{high $\kperp$}: many modes (many integer pairs $(n_x, n_y)$ give similar $\sqrt{n_x^2 + n_y^2}$) $\to$ single realization is fine
+    \item At \textbf{low $\kperp$}: few modes $\to$ large scatter $\to$ dark patches in the filter
+\end{itemize}
+Averaging over $N$ realizations reduces scatter by $\sqrt{N}$, converging to the analytical result.
+
+%======================================================================
+\section{Order of operations for the kSZ$^2\times$21cm$^2$ pipeline}
+%======================================================================
+
+The paper (Section~3) emphasises the following order:
+\begin{enumerate}
+    \item Extract a redshift chunk from the 21\,cm light cone
+    \item Fourier transform the 3D chunk
+    \item Apply filters: $f^{21\mathrm{cm}}$ for 21\,cm, $f_\mathrm{kSZ}$ for kSZ
+    \item Inverse FFT back to real space
+    \item \textbf{Square} the fields in configuration space: $(\delta T_{21})^2$, $(\delta T_\mathrm{kSZ})^2$
+    \item \textbf{Then} project 21\,cm to 2D by integrating along LOS
+    \item Compute cross-power spectrum between squared fields
+\end{enumerate}
+
+If you project \emph{before} squaring, the radial modes that survived filtering are lost in the projection. Squaring first preserves the 3D mode information.
+
+This ordering is specific to the kSZ$^2\times$21cm$^2$ cross-correlation. For a direct (unsquared) cross-correlation, this issue does not apply.
+
+%======================================================================
+\section{Summary of key numbers at $z=8$}
+%======================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule
+Quantity & Value \\
+\midrule
+Observed frequency $\nu_\mathrm{obs}$ & 158\,MHz \\
+Wavelength $\lambda$ & 1.9\,m \\
+System temperature $\Tsys$ & $\sim 700$\,K \\
+Comoving distance $D_M = X$ & $\sim 6500$\,Mpc \\
+LOS conversion $Y$ & $\sim 12$\,Mpc/MHz \\
+Wedge slope $m(z)$ & 0.32 (cosmological), 1.0 (horizon limit) \\
+HERA dishes & 350, diameter 14\,m \\
+Integration time & 200\,h (paper) / 1080\,h (our setup) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}
