@@ -14,11 +14,7 @@ from scipy.stats import pearsonr
 from powerbox import get_power
 import gc
 from matplotlib.lines import Line2D
-
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
+ 
 LITTLEH = 0.7
 BOX_MPC_OVER_H = 500.0
 K_MIN = 0.012  # Minimum k for Fourier analysis [h/Mpc]
@@ -699,6 +695,276 @@ def compute_fourier_correlation_coefficient_3d(field1, field2, boxlength, bins=F
     return k_centers, r_k
 
 # ============================================================================
+# JACKKNIFE HELPERS
+# ============================================================================
+# Spatial block jackknife: partition the volume into N cube/tile sub-volumes,
+# compute the statistic on each leave-one-out subset (N-1 blocks), and report
+#     σ_jk² = (N-1)/N · Σ_i (x_i − x̄)²
+# with x̄ the mean across the N leave-one-out estimates.
+#
+# For Pearson r we use the additive-sum trick: per-block sums of A, B, A², B²,
+# AB allow the leave-one-out r to be reconstructed in O(N) without re-flattening
+# big arrays. For r(k) we compute the spectrum on each sub-cube separately,
+# interpolate onto the full-box k-grid, and average over the (N-1) blocks.
+# ============================================================================
+
+def _block_sums(field_a, field_b, n_per_side):
+    """Per-block sums of A, B, A², B², AB and cell count for jackknife."""
+    shape = field_a.shape
+    splits = [np.array_split(np.arange(s), n_per_side) for s in shape]
+    blocks = []
+    for ix in splits[0]:
+        for iy in splits[1]:
+            if len(shape) == 3:
+                for iz in splits[2]:
+                    a = field_a[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1,
+                                iz[0]:iz[-1]+1].astype(np.float64, copy=False)
+                    b = field_b[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1,
+                                iz[0]:iz[-1]+1].astype(np.float64, copy=False)
+                    blocks.append((a.size, a.sum(), b.sum(),
+                                   (a*a).sum(), (b*b).sum(), (a*b).sum()))
+            else:
+                a = field_a[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1].astype(np.float64,
+                                                                    copy=False)
+                b = field_b[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1].astype(np.float64,
+                                                                    copy=False)
+                blocks.append((a.size, a.sum(), b.sum(),
+                               (a*a).sum(), (b*b).sum(), (a*b).sum()))
+    return np.array(blocks, dtype=np.float64)
+
+
+def _pearson_from_sums(n, sa, sb, saa, sbb, sab):
+    num = n*sab - sa*sb
+    da = n*saa - sa*sa
+    db = n*sbb - sb*sb
+    if da <= 0 or db <= 0:
+        return np.nan
+    return float(num / np.sqrt(da * db))
+
+
+def jackknife_pearson_r(field_a, field_b, n_per_side=2):
+    """Leave-one-out jackknife on Pearson r between two equal-shape fields.
+
+    Works for 2D or 3D; uses n_per_side**D blocks. Returns
+    (mean of leave-one-out estimates, jackknife σ, leave-one-out values).
+    """
+    blocks = _block_sums(field_a, field_b, n_per_side)
+    total = blocks.sum(axis=0)
+    N = blocks.shape[0]
+    loo = np.empty(N)
+    for i in range(N):
+        s = total - blocks[i]
+        loo[i] = _pearson_from_sums(*s)
+    mean = float(np.nanmean(loo))
+    sigma = float(np.sqrt((N - 1) / N * np.nansum((loo - mean)**2)))
+    return mean, sigma, loo
+
+
+def jackknife_r_k_3d(field_a, field_b, boxlength, n_per_side=2,
+                     bins=FOURIER_BINS, k_grid=None):
+    """Octant-block jackknife on the Fourier correlation r(k) of 3D fields.
+
+    Computes r(k) on each sub-cube, interpolates onto `k_grid` (if given,
+    otherwise the first sub-cube's k-centres), then forms leave-one-out
+    averages and the jackknife σ band.
+    """
+    shape = field_a.shape
+    splits = [np.array_split(np.arange(s), n_per_side) for s in shape]
+    sub_L = boxlength / n_per_side
+    per_block = []
+    for ix in splits[0]:
+        for iy in splits[1]:
+            for iz in splits[2]:
+                a_sub = field_a[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1, iz[0]:iz[-1]+1]
+                b_sub = field_b[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1, iz[0]:iz[-1]+1]
+                k_s, r_s = compute_fourier_correlation_coefficient_3d(
+                    a_sub, b_sub, boxlength=sub_L, bins=bins
+                )
+                per_block.append((k_s, r_s))
+
+    if k_grid is None:
+        k_grid = per_block[0][0]
+
+    rks = np.array([np.interp(k_grid, k_s, r_s, left=np.nan, right=np.nan)
+                    for k_s, r_s in per_block])
+    N = rks.shape[0]
+    # Leave-one-out average across blocks (per-k)
+    with np.errstate(invalid='ignore'):
+        total = np.nansum(rks, axis=0)
+        count = np.sum(np.isfinite(rks), axis=0)
+        loo = np.empty_like(rks)
+        for i in range(N):
+            num = total - np.where(np.isfinite(rks[i]), rks[i], 0.0)
+            den = np.maximum(count - np.isfinite(rks[i]).astype(int), 1)
+            loo[i] = num / den
+    mean = np.nanmean(loo, axis=0)
+    sigma = np.sqrt((N - 1) / N * np.nansum((loo - mean)**2, axis=0))
+    return k_grid, mean, sigma
+
+
+def jackknife_r_k_2d(map_a, map_b, boxlength, n_per_side=2,
+                     bins=FOURIER_BINS, k_grid=None):
+    """Tile-block jackknife on the Fourier correlation r(k) of 2D maps."""
+    shape = map_a.shape
+    splits = [np.array_split(np.arange(s), n_per_side) for s in shape]
+    sub_L = [boxlength[0] / n_per_side, boxlength[1] / n_per_side]
+    per_block = []
+    for ix in splits[0]:
+        for iy in splits[1]:
+            a_sub = map_a[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1]
+            b_sub = map_b[ix[0]:ix[-1]+1, iy[0]:iy[-1]+1]
+            k_s, r_s = compute_fourier_correlation_coefficient(
+                a_sub, b_sub, boxlength=sub_L, bins=bins
+            )
+            per_block.append((k_s, r_s))
+
+    if k_grid is None:
+        k_grid = per_block[0][0]
+
+    rks = np.array([np.interp(k_grid, k_s, r_s, left=np.nan, right=np.nan)
+                    for k_s, r_s in per_block])
+    N = rks.shape[0]
+    with np.errstate(invalid='ignore'):
+        total = np.nansum(rks, axis=0)
+        count = np.sum(np.isfinite(rks), axis=0)
+        loo = np.empty_like(rks)
+        for i in range(N):
+            num = total - np.where(np.isfinite(rks[i]), rks[i], 0.0)
+            den = np.maximum(count - np.isfinite(rks[i]).astype(int), 1)
+            loo[i] = num / den
+    mean = np.nanmean(loo, axis=0)
+    sigma = np.sqrt((N - 1) / N * np.nansum((loo - mean)**2, axis=0))
+    return k_grid, mean, sigma
+
+
+# ============================================================================
+# R(k,z) MEASUREMENT — ionisation-to-density ratio
+# ============================================================================
+
+def measure_R_kz_single(z, n=600, bins=40, use_crop=True):
+    """
+    Measure the ionisation-to-density ratio R(k,z) at a single redshift.
+
+    R(k,z) = P_{δx_HI, δ}(k) / [ x̄_HI(z) · P_{δδ}(k) ]
+
+    From the paper:
+        Δ₂₁(k,z) ≈ [1 + R(k,z)] δ(k,z)
+
+    Parameters
+    ----------
+    z : float
+        Redshift.
+    n : int
+        Grid size (default 600).
+    bins : int
+        Number of spherical k-bins.
+    use_crop : bool
+        If True, apply CENTRAL_CROP to reduce boundary effects.
+
+    Returns
+    -------
+    dict with keys: z, mean_xHI, k, R_k, P_cross, P_auto
+    """
+    zstr = f"{z:.3f}"
+    filenameDen = f"{DATA_DIR}{zstr}n_all.dat"
+    filenameXhi = f"{DATA_DIR}{zstr}zeta0.389fesc0.389_Mmin0.120E+10_MminX0.120E+10_fx0.100E+03_sed3_al1.200xhi.bin"
+
+    den = read_den(filenameDen, n, n, n).astype(np.float64)
+    xhi = read_xhi(filenameXhi, n, n, n).astype(np.float64)
+
+    if use_crop:
+        den = den[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
+        xhi = xhi[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
+
+    # Overdensity δ = ρ/ρ̄ − 1
+    mean_den = den.mean()
+    delta = den / mean_den - 1.0
+
+    # Neutral fraction fluctuation
+    xhi_mean = float(xhi.mean())
+    delta_xhi = xhi - xhi_mean
+
+    # 3D rFFT
+    delta_k = np.fft.rfftn(delta)
+    delta_xhi_k = np.fft.rfftn(delta_xhi)
+
+    # k-space grid [h/Mpc]
+    nx, ny, nz_r = delta_k.shape
+    nz_full = delta.shape[2]
+    dx = BOX_MPC_OVER_H / n  # cell size in Mpc/h
+    kx = 2.0 * np.pi * np.fft.fftfreq(nx, d=dx)
+    ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=dx)
+    kz = 2.0 * np.pi * np.fft.rfftfreq(nz_full, d=dx)
+    kx_g, ky_g, kz_g = np.meshgrid(kx, ky, kz, indexing='ij')
+    k_mag = np.sqrt(kx_g**2 + ky_g**2 + kz_g**2)
+
+    # Bin edges
+    k_fundamental = 2.0 * np.pi / (dx * nx)  # ~ 2π / box_crop
+    k_max = min(k_mag.max(), 2.0)  # cap at 2 h/Mpc
+    k_edges = np.linspace(k_fundamental, k_max, bins + 1)
+    k_centers = 0.5 * (k_edges[:-1] + k_edges[1:])
+
+    # Cross-power and auto-power in shells
+    P_cross = np.zeros(bins)
+    P_auto = np.zeros(bins)
+    R_k = np.full(bins, np.nan)
+
+    for i in range(bins):
+        mask = (k_mag >= k_edges[i]) & (k_mag < k_edges[i + 1])
+        if not np.any(mask):
+            continue
+        cross = np.real(delta_xhi_k[mask] * np.conj(delta_k[mask]))
+        auto = np.real(delta_k[mask] * np.conj(delta_k[mask]))
+        P_cross[i] = cross.mean()
+        P_auto[i] = auto.mean()
+        if P_auto[i] > 0 and xhi_mean > 1e-6:
+            R_k[i] = P_cross[i] / (xhi_mean * P_auto[i])
+
+    print(f"  z={z:7.3f}  x̄_HI={xhi_mean:.4f}  "
+          f"R(k→0)≈{np.nanmean(R_k[:3]):.3f}  "
+          f"1+R(k→0)≈{1 + np.nanmean(R_k[:3]):.3f}")
+
+    del den, xhi, delta, delta_xhi, delta_k, delta_xhi_k
+    gc.collect()
+
+    return {
+        'z': z,
+        'mean_xHI': xhi_mean,
+        'k': k_centers,
+        'R_k': R_k,
+        'P_cross': P_cross,
+        'P_auto': P_auto,
+    }
+
+
+def measure_R_kz_all(redshifts, n=600, bins=40):
+    """
+    Measure R(k,z) at multiple redshifts.
+
+    Parameters
+    ----------
+    redshifts : list of float
+    n : int
+        Grid size.
+    bins : int
+        Number of k-bins.
+
+    Returns
+    -------
+    list of dict (one per redshift, same format as measure_R_kz_single).
+    """
+    print("\n" + "="*80)
+    print("MEASURING R(k,z) — ionisation-to-density ratio")
+    print("="*80)
+
+    R_results = []
+    for z in redshifts:
+        res = measure_R_kz_single(z, n=n, bins=bins)
+        R_results.append(res)
+    return R_results
+
+
+# ============================================================================
 # PLOTTING FUNCTIONS
 # ============================================================================
 
@@ -857,6 +1123,118 @@ def plot_velocity_correlation_combined(results, output_dir=OUTPUT_DIR):
                 dpi=300, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {output_dir}/velocity_correlation_combined.png")
+
+
+def plot_velocity_correlation_jk(results, output_dir=OUTPUT_DIR):
+    """Fig 3 with jackknife error bars.
+
+    Left  panel: real-space r(3D), r(2D) vs ⟨x_HI⟩ with σ_jk error bars.
+    Right panel: r(k) vs k for selected redshifts with ±σ_jk shaded bands.
+    Saves to <output_dir>/velocity_correlation_jk.{png,pdf}.
+    """
+    print("\n" + "=" * 80)
+    print("Plotting: Velocity Correlation Combined (jackknife)")
+    print("=" * 80)
+
+    neutral_fractions = np.array([r['mean_xHI'] for r in results])
+    r_3d_values = -np.array([r['r_3d'] for r in results])
+    r_2d_values = -np.array([r['r_2d'] for r in results])
+    r_3d_sigma = np.array([r.get('r_3d_jk_sigma', np.nan) for r in results])
+    r_2d_sigma = np.array([r.get('r_2d_jk_sigma', np.nan) for r in results])
+    redshifts = np.array([r['z'] for r in results])
+
+    target_xHI_plot = [0.95, 0.55, 0.25, 0.05]
+    selected_results = []
+    for target in target_xHI_plot:
+        best_idx = min(range(len(results)),
+                       key=lambda i: abs(results[i]['mean_xHI'] - target))
+        if results[best_idx] not in selected_results:
+            selected_results.append(results[best_idx])
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+    # Left panel: real-space Pearson r with jackknife error bars
+    ax = axes[0]
+    ax.plot(neutral_fractions, r_3d_values, '--', lw=2, color='gray',
+            alpha=0.6, zorder=1)
+    ax.plot(neutral_fractions, r_2d_values, '--', lw=2, color='gray',
+            alpha=0.6, zorder=1)
+    norm = plt.Normalize(vmin=redshifts.min(), vmax=redshifts.max())
+    colors_pts = plt.cm.viridis(norm(redshifts))
+    ax.errorbar(neutral_fractions, r_3d_values, yerr=r_3d_sigma,
+                fmt='none', ecolor='gray', alpha=0.6, zorder=3)
+    ax.errorbar(neutral_fractions, r_2d_values, yerr=r_2d_sigma,
+                fmt='none', ecolor='gray', alpha=0.6, zorder=3)
+    sc1 = ax.scatter(neutral_fractions, r_3d_values, c=redshifts, cmap='viridis',
+                     s=60, zorder=5, marker='o')
+    ax.scatter(neutral_fractions, r_2d_values, c=redshifts, cmap='viridis',
+               s=60, zorder=5, marker='s')
+    cbar = plt.colorbar(sc1, ax=ax, pad=0.02)
+    cbar.set_label('Redshift z', fontsize=20)
+    cbar.ax.tick_params(labelsize=18)
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+               markersize=10, label='3D field'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='gray',
+               markersize=10, label='2D integrated'),
+    ]
+    ax.legend(handles=legend_elements, fontsize=18, loc='upper left',
+              framealpha=0.9)
+    ax.axhline(y=0, color='black', lw=1, alpha=0.5)
+    ax.set_xlabel('Mean Neutral Fraction $\\langle x_{HI} \\rangle$', fontsize=22)
+    ax.set_ylabel('$r(x)$', fontsize=22)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-1.05, 1.05])
+    ax.set_xlim([0.0, 1.0])
+    ax.set_yticks([-1.0, -0.5, 0.0, 0.5, 1.0])
+    ax.tick_params(axis='both', which='major', labelsize=20)
+
+    # Right panel: r(k) curves with jackknife error bands
+    ax = axes[1]
+    cmap = plt.cm.viridis
+    for result in selected_results:
+        color = cmap(norm(result['z']))
+        k3d = result['k_values_vel_3d']
+        r3d = -result['r_k_vel_3d']
+        s3d = result.get('r_k_vel_3d_jk_sigma', np.zeros_like(r3d))
+        m3d = (k3d <= 1.0) & np.isfinite(r3d)
+        ax.fill_between(k3d[m3d], (r3d - s3d)[m3d], (r3d + s3d)[m3d],
+                        color=color, alpha=0.15, zorder=1)
+        ax.plot(k3d[m3d], r3d[m3d], color=color, lw=2.0, linestyle='--',
+                alpha=0.85)
+
+        k2d = result['k_values_vel_2d']
+        r2d = -result['r_k_vel_2d']
+        s2d = result.get('r_k_vel_2d_jk_sigma', np.zeros_like(r2d))
+        m2d = (k2d <= 1.0) & np.isfinite(r2d)
+        ax.fill_between(k2d[m2d], (r2d - s2d)[m2d], (r2d + s2d)[m2d],
+                        color=color, alpha=0.15, zorder=1)
+        ax.plot(k2d[m2d], r2d[m2d], color=color, lw=2.0, linestyle='-',
+                label=f"z={result['z']:.2f}, $x_{{HI}}$={result['mean_xHI']:.2f}")
+
+    ax.axhline(y=0, color='black', lw=0.8, alpha=0.5)
+    ax.set_xlabel('k [h/Mpc]', fontsize=22)
+    ax.set_ylabel('$r(k)$', fontsize=22)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-1.05, 1.05])
+    ax.set_yticks([-1.0, -0.5, 0.0, 0.5, 1.0])
+    ax.set_xlim([0.0, 1.0])
+    style_legend = [
+        Line2D([0], [0], color='gray', lw=2, linestyle='-', label='2D projected'),
+        Line2D([0], [0], color='gray', lw=2, linestyle='--', label='3D field'),
+    ]
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(style_legend + handles,
+              ['2D projected', '3D field'] + labels,
+              fontsize=18, loc='upper right', framealpha=0.9)
+    ax.tick_params(axis='both', which='major', labelsize=20)
+
+    plt.tight_layout()
+    for ext in ('png', 'pdf'):
+        out = os.path.join(output_dir, f'velocity_correlation_jk.{ext}')
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"  Saved: {out}")
+    plt.close()
 
 
 def plot_2d_velocity_scatter(z, output_dir=OUTPUT_DIR):
@@ -1621,12 +1999,221 @@ def plot_ksz_correlation_vs_neutral_fraction(all_results, smooth_sigma=SMOOTH_SI
     plt.close()
     print(f"  Saved: {output_dir}ksz_correlation_vs_neutral_fraction.png")
 
-def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
-    """Stitch real kSZ from multiple boxes and compare to individual reconstructions.
+def plot_R_kz_vs_k(R_results, output_dir=OUTPUT_DIR):
+    """
+    Plot R(k,z) and 1+R(k,z) vs k at several redshifts.
 
-    Uses central cropping in all 3 dimensions to reduce boundary effects.
-    Selects n_stitch redshifts evenly spaced by neutral fraction for stitching.
-    Plots only 6 redshifts based on target neutral fractions.
+    Two-panel figure:
+        Left:  R(k,z) vs k
+        Right: 1+R(k,z) vs k   (the effective 21cm bias factor)
+    """
+    print("\n" + "="*80)
+    print("Plotting: R(k,z) vs k")
+    print("="*80)
+
+    # Sort by redshift (high z first for legend ordering)
+    R_sorted = sorted(R_results, key=lambda r: r['z'], reverse=True)
+
+    redshifts = np.array([r['z'] for r in R_sorted])
+    cmap = plt.cm.coolwarm_r
+    norm = plt.Normalize(vmin=redshifts.min(), vmax=redshifts.max())
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+
+    # Left panel: R(k,z)
+    ax = axes[0]
+    for res in R_sorted:
+        k, R_k = res['k'], res['R_k']
+        mask = np.isfinite(R_k) & (k > 0) & (k <= K_MAX_PLOT)
+        color = cmap(norm(res['z']))
+        ax.semilogx(k[mask], R_k[mask], '-', color=color, lw=1.5,
+                     label=f"z={res['z']:.2f} ($\\bar{{x}}_{{HI}}$={res['mean_xHI']:.2f})")
+
+    ax.axhline(0, color='grey', ls='--', lw=0.8, alpha=0.5)
+    ax.axhline(-1, color='grey', ls=':', lw=0.8, alpha=0.5)
+    ax.set_xlabel('k [h/Mpc]', fontsize=22)
+    ax.set_ylabel('$R(k,z)$', fontsize=22)
+    ax.set_title('Ionisation-to-density ratio $R(k,z)$', fontsize=16)
+    ax.legend(fontsize=9, ncol=2, loc='lower left')
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    ax.grid(True, alpha=0.3)
+
+    # Right panel: 1 + R(k,z)
+    ax2 = axes[1]
+    for res in R_sorted:
+        k, R_k = res['k'], res['R_k']
+        mask = np.isfinite(R_k) & (k > 0) & (k <= K_MAX_PLOT)
+        color = cmap(norm(res['z']))
+        ax2.semilogx(k[mask], 1.0 + R_k[mask], '-', color=color, lw=1.5,
+                      label=f"z={res['z']:.2f}")
+
+    ax2.axhline(1, color='grey', ls='--', lw=0.8, alpha=0.5)
+    ax2.axhline(0, color='grey', ls=':', lw=0.8, alpha=0.5)
+    ax2.set_xlabel('k [h/Mpc]', fontsize=22)
+    ax2.set_ylabel('$1 + R(k,z)$', fontsize=22)
+    ax2.set_title('Effective 21cm bias $[1+R(k,z)]$', fontsize=16)
+    ax2.legend(fontsize=9, ncol=2, loc='lower left')
+    ax2.tick_params(axis='both', which='major', labelsize=20)
+    ax2.grid(True, alpha=0.3)
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes.ravel().tolist(), shrink=0.85, pad=0.02)
+    cbar.set_label('Redshift $z$', fontsize=20)
+    cbar.ax.tick_params(labelsize=18)
+
+    plt.tight_layout()
+    outfile = os.path.join(output_dir, 'R_kz_vs_k.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    outfile_pdf = os.path.join(output_dir, 'R_kz_vs_k.pdf')
+    plt.savefig(outfile_pdf, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+    print(f"  Saved: {outfile_pdf}")
+
+
+def plot_one_plus_R_vs_neutral_fraction(R_results, output_dir=OUTPUT_DIR):
+    """
+    Plot 1+R(k,z) vs mean neutral fraction with redshift colorbar.
+
+    Matches the style of plot_velocity_correlation_vs_neutral_fraction.
+    Shows three scale bins (large, mid, small) with different markers.
+    """
+    print("\n" + "="*80)
+    print("Plotting: 1+R vs Neutral Fraction")
+    print("="*80)
+
+    neutral_fractions = []
+    redshifts = []
+    one_plus_R_large = []   # k < 0.1 h/Mpc
+    one_plus_R_mid = []     # 0.1 < k < 0.3 h/Mpc
+    one_plus_R_small = []   # 0.3 < k < 1.0 h/Mpc
+
+    for res in R_results:
+        k = res['k']
+        R_k = res['R_k']
+        neutral_fractions.append(res['mean_xHI'])
+        redshifts.append(res['z'])
+
+        mask_large = (k > 0) & (k < 0.1) & np.isfinite(R_k)
+        mask_mid   = (k >= 0.1) & (k < 0.3) & np.isfinite(R_k)
+        mask_small = (k >= 0.3) & (k < 1.0) & np.isfinite(R_k)
+
+        one_plus_R_large.append(1 + np.nanmean(R_k[mask_large]) if mask_large.any() else np.nan)
+        one_plus_R_mid.append(1 + np.nanmean(R_k[mask_mid]) if mask_mid.any() else np.nan)
+        one_plus_R_small.append(1 + np.nanmean(R_k[mask_small]) if mask_small.any() else np.nan)
+
+    neutral_fractions = np.array(neutral_fractions)
+    redshifts = np.array(redshifts)
+    one_plus_R_large = np.array(one_plus_R_large)
+    one_plus_R_mid = np.array(one_plus_R_mid)
+    one_plus_R_small = np.array(one_plus_R_small)
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+    ax.tick_params(axis='both', which='major', labelsize=20, length=8, width=2, pad=10)
+
+    # Dashed gray lines connecting points
+    ax.plot(neutral_fractions, one_plus_R_large, '--', linewidth=2, color='gray', alpha=0.6, zorder=1)
+    ax.plot(neutral_fractions, one_plus_R_mid, '--', linewidth=2, color='gray', alpha=0.6, zorder=1)
+    ax.plot(neutral_fractions, one_plus_R_small, '--', linewidth=2, color='gray', alpha=0.6, zorder=1)
+
+    # Scatter with redshift color coding
+    sc1 = ax.scatter(neutral_fractions, one_plus_R_large, c=redshifts, cmap='viridis',
+                     s=100, zorder=5, marker='o', edgecolors='k', linewidths=0.5)
+    sc2 = ax.scatter(neutral_fractions, one_plus_R_mid, c=redshifts, cmap='viridis',
+                     s=80, zorder=5, marker='s', edgecolors='k', linewidths=0.5)
+    sc3 = ax.scatter(neutral_fractions, one_plus_R_small, c=redshifts, cmap='viridis',
+                     s=60, zorder=5, marker='^', edgecolors='k', linewidths=0.5)
+
+    # Colorbar for redshift
+    cbar = plt.colorbar(sc1, ax=ax, pad=0.02)
+    cbar.set_label('Redshift z', fontsize=20)
+    cbar.ax.tick_params(labelsize=18)
+
+    # Reference lines
+    ax.axhline(1, color='k', ls='--', lw=1, alpha=0.4)
+    ax.axhline(0, color='k', ls=':', lw=1.5, alpha=0.6)
+
+    # Legend for scale markers
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+               markersize=10, label='$k < 0.1$ h/Mpc'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='gray',
+               markersize=9, label='$0.1 < k < 0.3$ h/Mpc'),
+        Line2D([0], [0], marker='^', color='w', markerfacecolor='gray',
+               markersize=9, label='$0.3 < k < 1.0$ h/Mpc'),
+    ]
+    ax.legend(handles=legend_elements, fontsize=14, loc='lower right', framealpha=0.9)
+
+    ax.set_xlabel('Mean Neutral Fraction $\\langle x_{HI} \\rangle$', fontsize=22)
+    ax.set_ylabel('$1 + R(k,z)$', fontsize=22)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim([-0.02, 1.02])
+
+    plt.tight_layout()
+    outfile = os.path.join(output_dir, 'one_plus_R_vs_neutral_fraction.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    outfile_pdf = os.path.join(output_dir, 'one_plus_R_vs_neutral_fraction.pdf')
+    plt.savefig(outfile_pdf, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+    print(f"  Saved: {outfile_pdf}")
+
+
+def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51,
+                                             lightcone_slab=True):
+    """Stitch real kSZ from multiple coeval boxes and compare to individual
+    reconstructions.
+
+    Uses central cropping in (x,y) to reduce boundary effects.
+
+    Parameters
+    ----------
+    lightcone_slab : bool
+        If True (default), use the thin-slab lightcone approximation.
+
+        PROBLEM WITH NAIVE STACKING
+        ---------------------------
+        Naively summing the full kSZ map from each coeval box integrates
+        through the entire box depth (L_box) at every redshift.  Stacking
+        N_z such maps therefore integrates over N_z × L_box of LOS
+        structure.  For 51 snapshots of a 714 Mpc box this is ~36 Gpc,
+        whereas the true comoving distance from z=6 to z=12 is only
+        ~2.5 Gpc — an over-count by a factor ~15, producing inflated
+        amplitudes of ±300 µK.
+
+        THIN-SLAB LIGHTCONE APPROXIMATION
+        ----------------------------------
+        In a real lightcone, each redshift z_i contributes a slab of
+        comoving thickness
+
+            Δχ_i = χ(z_{i+1/2}) − χ(z_{i−1/2})
+
+        where z_{i±1/2} are the midpoints to adjacent snapshots.
+
+        The kSZ contribution from that slab is:
+
+            ΔT_i(x,y) = −(T_CMB σ_T / c) n̄_e(z_i) (Δx_proper)
+                         × Σ_{j ∈ slab_i} x_e(x,y,j) [1+δ(x,y,j)] v_r(x,y,j)
+
+        where the sum runs over only N_slab,i cells along axis 2:
+
+            N_slab,i = round(Δχ_i / Δx_comoving)
+
+        To choose WHICH cells, we tile through the periodic box along
+        the LOS: the cumulative comoving distance from z_0 determines
+        the offset into the box,
+
+            j_start,i = floor[ (χ(z_i) − χ(z_0)) mod L_box / Δx_comoving ]
+
+        This preserves spatial correlation between adjacent redshift
+        slices (they sample adjacent cells) while wrapping around the
+        periodic boundary when the LOS exceeds one box length — mimicking
+        passage through independent large-scale structure.
+
+        NOTE: This applies equally to Grizzly AND 21cmFAST coeval boxes.
+        21cmFAST lightcones do not need this because the LOS is already
+        constructed correctly.
     """
     # All 51 redshifts with complete data
     all_redshifts = [
@@ -1651,41 +2238,111 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
     print("INTEGRATED kSZ ANALYSIS: REAL vs RECONSTRUCTION")
     print("="*80)
     print(f"Using {len(redshifts_stitch)} redshifts")
+    print(f"Lightcone thin-slab: {'ON' if lightcone_slab else 'OFF (full box per z)'}")
     print("Computing kSZ maps per redshift and summing (memory efficient)...")
 
-    # Initialize accumulated kSZ maps
+    # ── Pre-compute thin-slab parameters ────────────────────────────────
+    if lightcone_slab:
+        from scipy.integrate import quad as _quad
+
+        def _chi(z_val):
+            """Comoving distance in Mpc (not Mpc/h)."""
+            c_km_s = 299792.458
+            H0_loc = 100.0 * LITTLEH
+            Om = 0.27
+            integrand = lambda zp: 1.0 / np.sqrt(Om * (1 + zp)**3 + (1 - Om))
+            result, _ = _quad(integrand, 0, z_val)
+            return c_km_s / H0_loc * result
+
+        cell_comoving = BOX_MPC_OVER_H / LITTLEH / 600  # Mpc per cell (comoving)
+        box_comoving = BOX_MPC_OVER_H / LITTLEH          # full box in Mpc
+
+        # Comoving distances for all snapshots
+        chi_all = np.array([_chi(z) for z in redshifts_stitch])
+        chi_0 = chi_all[0]
+
+        # Comoving slab thickness Δχ_i (Voronoi-style: midpoints to neighbours)
+        dchi = np.zeros(len(redshifts_stitch))
+        for i in range(len(redshifts_stitch)):
+            if i == 0:
+                z_lo = redshifts_stitch[0]
+            else:
+                z_lo = 0.5 * (redshifts_stitch[i - 1] + redshifts_stitch[i])
+            if i == len(redshifts_stitch) - 1:
+                z_hi = redshifts_stitch[-1]
+            else:
+                z_hi = 0.5 * (redshifts_stitch[i] + redshifts_stitch[i + 1])
+            dchi[i] = _chi(z_hi) - _chi(z_lo)
+
+        total_los = chi_all[-1] - chi_all[0]
+        print(f"  Total comoving LOS: {total_los:.0f} Mpc  (box = {box_comoving:.0f} Mpc)")
+        print(f"  LOS / box = {total_los / box_comoving:.1f} box lengths")
+        print(f"  Mean slab thickness: {dchi.mean():.1f} Mpc  "
+              f"({dchi.mean() / cell_comoving:.0f} cells)")
+
+    # ── Main loop ───────────────────────────────────────────────────────
     ksz_map_full_real = None
     ksz_map_full_rec = None
     individual_results = []
     n_full = None
 
-    for z in redshifts_stitch:
+    for idx_z, z in enumerate(redshifts_stitch):
         print(f"\nLoading and processing box at z={z}...")
-        (den, xhi, vx, vy, vz, vx_rec, vy_rec, vz_rec, 
+        (den, xhi, vx, vy, vz, vx_rec, vy_rec, vz_rec,
          vx_recx, vy_recx, vz_recx, _, _, _, _, _) = reconstruct_velocities(z)
 
         if n_full is None:
             n_full = vz.shape[0]
 
-        # Apply central crop in all 3 directions to avoid boundary effects
-        den = den[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
-        xhi = xhi[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
-        vz = vz[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
-        vz_recx = vz_recx[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
+        # Central crop in (x,y) to avoid boundary effects
+        den = den[CENTRAL_CROP, CENTRAL_CROP, :]
+        xhi = xhi[CENTRAL_CROP, CENTRAL_CROP, :]
+        vz = vz[CENTRAL_CROP, CENTRAL_CROP, :]
+        vz_recx = vz_recx[CENTRAL_CROP, CENTRAL_CROP, :]
 
         mean_xhi = xhi.mean()
-        print(f"  Shape: {vz.shape}, mean xHI: {mean_xhi:.4f}")
 
-        # Compute kSZ maps for this redshift
-        ksz_real_z = compute_ksz_maps(vz, xhi, den, z=z, physical_norm=PHYSICAL_NORM)
-        ksz_rec_z = compute_ksz_maps(-vz_recx, xhi, den, z=z, physical_norm=PHYSICAL_NORM)
+        if lightcone_slab:
+            # Select thin slab along axis 2
+            n_slab = max(1, round(dchi[idx_z] / cell_comoving))
 
-        # Store individual reconstruction for per-redshift analysis
+            # Tile through periodic box: offset = cumulative distance mod box
+            j_start = int(((chi_all[idx_z] - chi_0) % box_comoving) / cell_comoving)
+            j_start = j_start % n_full  # wrap
+
+            # Extract slab with periodic wrapping
+            indices = np.arange(j_start, j_start + n_slab) % n_full
+            den_slab = den[:, :, indices]
+            xhi_slab = xhi[:, :, indices]
+            vz_slab = vz[:, :, indices]
+            vz_recx_slab = vz_recx[:, :, indices]
+
+            print(f"  Slab: {n_slab} cells (Δχ={dchi[idx_z]:.1f} Mpc), "
+                  f"offset j={j_start}, mean xHI: {mean_xhi:.4f}")
+
+            ksz_real_z = compute_ksz_maps(vz_slab, xhi_slab, den_slab,
+                                          z=z, physical_norm=PHYSICAL_NORM)
+            ksz_rec_z = compute_ksz_maps(vz_recx_slab, xhi_slab, den_slab,
+                                         z=z, physical_norm=PHYSICAL_NORM)
+        else:
+            # Full box integration (original behaviour)
+            den = den[:, :, LOS_CROP]
+            xhi = xhi[:, :, LOS_CROP]
+            vz = vz[:, :, LOS_CROP]
+            vz_recx = vz_recx[:, :, LOS_CROP]
+            print(f"  Shape: {vz.shape}, mean xHI: {mean_xhi:.4f}")
+
+            ksz_real_z = compute_ksz_maps(vz, xhi, den,
+                                          z=z, physical_norm=PHYSICAL_NORM)
+            ksz_rec_z = compute_ksz_maps(vz_recx, xhi, den,
+                                         z=z, physical_norm=PHYSICAL_NORM)
+
+        # Store per-redshift results (full-box maps for Fourier correlation)
         individual_results.append({
             'z': z,
             'mean_xhi': mean_xhi,
-            'ksz_real': ksz_real_z.copy(),  # Store per-z real for Fourier comparison
-            'ksz_rec': ksz_rec_z.copy(),  # Copy since we'll accumulate
+            'ksz_real': ksz_real_z.copy(),
+            'ksz_rec': ksz_rec_z.copy(),
         })
 
         # Accumulate for integrated maps
@@ -1701,6 +2358,8 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
         gc.collect()
 
     print(f"\nIntegrated kSZ maps computed (summed over {len(redshifts_stitch)} redshifts)")
+    print(f"  Range: [{ksz_map_full_real.min():.2f}, {ksz_map_full_real.max():.2f}] µK")
+    print(f"  Std:   {ksz_map_full_real.std():.2f} µK")
 
     # Box size for the cropped region
     n_crop = CENTRAL_CROP.stop - CENTRAL_CROP.start
@@ -1724,25 +2383,37 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
         ksz_rec_z = result['ksz_rec']
         ksz_real_z = result['ksz_real']
 
-        # Real-space correlation (per-z rec vs integrated real)
+        # Paper definition: per-z reconstructed map compared against the
+        # FULL integrated real kSZ map, in BOTH real and Fourier space.
         r_cross = pearson_r(ksz_map_full_real, ksz_rec_z)
 
-        # Fourier correlation (per-z rec vs per-z real for meaningful k-space comparison)
         k_values, r_k = compute_fourier_correlation_coefficient(
-            ksz_real_z, ksz_rec_z,
+            ksz_map_full_real, ksz_rec_z,
             boxlength=[Ly_crop, Lx_crop],
+        )
+
+        # Transverse-tile jackknife (kSZ is a 2D projection so blocks must
+        # live in the (x, y) plane only).
+        _, r_cross_jk_sigma, _ = jackknife_pearson_r(
+            ksz_map_full_real, ksz_rec_z, n_per_side=2
+        )
+        _, _, r_k_jk_sigma = jackknife_r_k_2d(
+            ksz_map_full_real, ksz_rec_z, boxlength=[Ly_crop, Lx_crop],
+            n_per_side=2, k_grid=k_values
         )
 
         cross_corr_results_individual.append({
             'z': z,
             'mean_xhi': mean_xhi,
             'r_cross': r_cross,
+            'r_cross_jk_sigma': r_cross_jk_sigma,
             'k_values': k_values,
             'r_k': r_k,
+            'r_k_jk_sigma': r_k_jk_sigma,
             'mean_r_k': np.mean(r_k[np.isfinite(r_k)]) if np.any(np.isfinite(r_k)) else np.nan,
         })
 
-        print(f"  z={z:.3f}, xHI={mean_xhi:.3f}: r={r_cross:.4f}")
+        print(f"  z={z:.3f}, xHI={mean_xhi:.3f}: r={r_cross:+.4f} ± {r_cross_jk_sigma:.4f}")
 
     # =========================================================================
     # ANALYSIS 2: Integrated reconstruction vs integrated real kSZ
@@ -1788,16 +2459,16 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
         print(f"    z={r['z']:.3f}, <xHI>={r['mean_xhi']:.3f}")
 
     # =========================================================================
-    # PLOT 1: Per-redshift reconstruction vs integrated real kSZ
+    # PLOT 1: Correlation vs neutral fraction (real-space and Fourier at fixed ℓ)
     # =========================================================================
     fig, axes = plt.subplots(1, 2, figsize=(18, 6))
 
-    # Extract arrays for ALL redshifts (for left plot)
-    xhi_vals_all = np.array([cross_result['mean_xhi'] for cross_result in cross_corr_results])
-    r_vals_all = -np.array([cross_result['r_cross'] for cross_result in cross_corr_results])
-    z_vals_all = np.array([cross_result['z'] for cross_result in cross_corr_results])
+    # Extract arrays for ALL redshifts
+    xhi_vals_all = np.array([cr['mean_xhi'] for cr in cross_corr_results])
+    r_vals_all = np.array([cr['r_cross'] for cr in cross_corr_results])
+    z_vals_all = np.array([cr['z'] for cr in cross_corr_results])
 
-    # Left: Real-space correlation r(x) vs neutral fraction - ALL redshifts
+    # Left: Real-space correlation r(x) vs neutral fraction
     ax = axes[0]
     ax.plot(xhi_vals_all, r_vals_all, '--', color='gray', lw=2.5, alpha=0.7, zorder=1)
     sc = ax.scatter(xhi_vals_all, r_vals_all, c=z_vals_all, cmap='viridis', s=60, zorder=5)
@@ -1812,26 +2483,36 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
     ax.set_xlim([-0.05, 1.05])
     ax.tick_params(axis='both', which='major', labelsize=20)
 
-    # Right: Fourier correlations r(ell) - 4 selected redshifts for readability
+    # Right: Fourier r(ℓ) at fixed ℓ values vs neutral fraction
     ax = axes[1]
-    z_vals_selected = np.array([cross_result['z'] for cross_result in selected_cross_results])
-    norm = plt.Normalize(vmin=z_vals_all.min(), vmax=z_vals_all.max())
-    cmap = plt.cm.viridis
-    for cross_result in selected_cross_results:
-        # Convert k to ell using comoving distance at this redshift
-        chi = comoving_distance(cross_result['z'])
-        ell_values = cross_result['k_values'] * chi
-        color = cmap(norm(cross_result['z']))
-        ax.plot(ell_values, -cross_result['r_k'],
-                color=color, linewidth=2.0,
-                label=f"z={cross_result['z']:.2f}, xHI={cross_result['mean_xhi']:.2f}")
+    ell_targets = [2500, 3000, 3500]
+    markers = ['o', 's', '^']
+    colors_ell = ['#1f77b4', '#ff7f0e', '#2ca02c']
+
+    for ell_t, marker, color in zip(ell_targets, markers, colors_ell):
+        r_at_ell = []
+        for cr in cross_corr_results:
+            chi = comoving_distance(cr['z'])
+            ell_values = cr['k_values'] * chi
+            # Interpolate r(k) at the k corresponding to this ℓ
+            valid = np.isfinite(cr['r_k']) & np.isfinite(ell_values)
+            if np.any(valid):
+                r_interp = np.interp(ell_t, ell_values[valid], cr['r_k'][valid])
+            else:
+                r_interp = np.nan
+            r_at_ell.append(r_interp)
+        r_at_ell = np.array(r_at_ell)
+        ax.plot(xhi_vals_all, r_at_ell, '--', color='gray', lw=1.5, alpha=0.4, zorder=1)
+        ax.scatter(xhi_vals_all, r_at_ell, c=color, s=50, marker=marker,
+                   label=f'$\\ell = {ell_t}$', zorder=5)
+
     ax.axhline(y=0, color='black', linestyle='-', linewidth=0.8, alpha=0.5)
-    ax.set_xlabel('$\\ell$', fontsize=22)
+    ax.set_xlabel('Neutral Fraction $\\langle x_{HI} \\rangle$', fontsize=22)
     ax.set_ylabel('r($\\ell$)', fontsize=22)
     ax.grid(True, alpha=0.3)
     ax.set_ylim([-1.01, 1.01])
-    ax.set_xlim([2000, 4000])
-    ax.legend(fontsize=18, loc='upper right')
+    ax.set_xlim([-0.05, 1.05])
+    ax.legend(fontsize=18, loc='best')
     ax.tick_params(axis='both', which='major', labelsize=20)
 
     plt.tight_layout()
@@ -1864,7 +2545,7 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
     cbar.ax.tick_params(labelsize=18)
 
     plt.tight_layout()
-    outfile = os.path.join(OUTPUT_DIR, 'integrated_real_vs_integrated_reconstruction_v2.png')
+    outfile = os.path.join(OUTPUT_DIR, 'integrated_real_vs_integrated_reconstruction_v3.png')
     plt.savefig(outfile, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {outfile}")
@@ -1891,6 +2572,654 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51):
     for result in individual_results:
         del result['ksz_rec']
     gc.collect()
+
+    return cross_corr_results
+
+
+def plot_cross_correlator_evolution_jk(cross_corr_results, output_dir=OUTPUT_DIR):
+    """Fig 4 with jackknife error bars.
+
+    Left panel: real-space cross-correlator r(x) vs ⟨x_HI⟩ between the
+    per-redshift reconstructed kSZ and the integrated real kSZ, with σ_jk.
+    Right panel: r(ℓ) at ℓ = 2500, 3000, 3500 vs ⟨x_HI⟩, with σ_jk.
+    Both use a 2×2 transverse-tile jackknife (kSZ is a 2D projection).
+    Saves to <output_dir>/cross_correlator_evolution_jk.{png,pdf}.
+    """
+    print("\n" + "=" * 80)
+    print("Plotting: Cross-correlator evolution (jackknife)")
+    print("=" * 80)
+
+    xhi = np.array([cr['mean_xhi'] for cr in cross_corr_results])
+    z_arr = np.array([cr['z'] for cr in cross_corr_results])
+    r_x = np.array([cr['r_cross'] for cr in cross_corr_results])
+    r_x_sigma = np.array([cr.get('r_cross_jk_sigma', np.nan)
+                          for cr in cross_corr_results])
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+    # Left: real-space r(x)
+    ax = axes[0]
+    ax.plot(xhi, r_x, '--', color='gray', lw=2.5, alpha=0.7, zorder=1)
+    ax.errorbar(xhi, r_x, yerr=r_x_sigma, fmt='none', ecolor='gray',
+                alpha=0.7, zorder=3)
+    sc = ax.scatter(xhi, r_x, c=z_arr, cmap='viridis', s=60, zorder=5)
+    cbar = plt.colorbar(sc, ax=ax, pad=0.02)
+    cbar.set_label('Redshift z', fontsize=20)
+    cbar.ax.tick_params(labelsize=18)
+    ax.axhline(y=0, color='black', lw=0.8, alpha=0.5)
+    ax.set_xlabel('Neutral Fraction $\\langle x_{HI} \\rangle$', fontsize=22)
+    ax.set_ylabel('r(x)', fontsize=22)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-1.05, 1.05])
+    ax.set_xlim([-0.05, 1.05])
+    ax.tick_params(axis='both', which='major', labelsize=20)
+
+    # Right: r(ℓ) at fixed multipoles
+    ax = axes[1]
+    ell_targets = [2500, 3000, 3500]
+    markers = ['o', 's', '^']
+    colors_ell = ['#1f77b4', '#ff7f0e', '#2ca02c']
+
+    for ell_t, marker, color in zip(ell_targets, markers, colors_ell):
+        r_at_ell = []
+        s_at_ell = []
+        for cr in cross_corr_results:
+            chi = comoving_distance(cr['z'])
+            ell_vals = cr['k_values'] * chi
+            valid = np.isfinite(cr['r_k']) & np.isfinite(ell_vals)
+            if np.any(valid):
+                r_interp = np.interp(ell_t, ell_vals[valid], cr['r_k'][valid])
+                jk_curve = cr.get('r_k_jk_sigma', None)
+                if jk_curve is not None:
+                    valid_s = np.isfinite(jk_curve) & np.isfinite(ell_vals)
+                    s_interp = (np.interp(ell_t, ell_vals[valid_s],
+                                          jk_curve[valid_s])
+                                if np.any(valid_s) else np.nan)
+                else:
+                    s_interp = np.nan
+            else:
+                r_interp, s_interp = np.nan, np.nan
+            r_at_ell.append(r_interp)
+            s_at_ell.append(s_interp)
+        r_at_ell = np.array(r_at_ell)
+        s_at_ell = np.array(s_at_ell)
+        ax.plot(xhi, r_at_ell, '--', color='gray', lw=1.5, alpha=0.4,
+                zorder=1)
+        ax.errorbar(xhi, r_at_ell, yerr=s_at_ell, fmt='none', ecolor=color,
+                    alpha=0.4, zorder=3)
+        ax.scatter(xhi, r_at_ell, c=color, s=50, marker=marker,
+                   label=f'$\\ell = {ell_t}$', zorder=5)
+
+    ax.axhline(y=0, color='black', lw=0.8, alpha=0.5)
+    ax.set_xlabel('Neutral Fraction $\\langle x_{HI} \\rangle$', fontsize=22)
+    ax.set_ylabel('r($\\ell$)', fontsize=22)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-1.05, 1.05])
+    ax.set_xlim([-0.05, 1.05])
+    ax.legend(fontsize=18, loc='best')
+    ax.tick_params(axis='both', which='major', labelsize=20)
+
+    plt.tight_layout()
+    for ext in ('png', 'pdf'):
+        out = os.path.join(output_dir, f'cross_correlator_evolution_jk.{ext}')
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"  Saved: {out}")
+    plt.close()
+
+
+def plot_xhi_and_dTb_midpoint(n=600, output_dir=OUTPUT_DIR):
+    """Plot x_HI and δTb maps at the midpoint (~50%) of reionization.
+
+    Scans all 51 available redshifts, picks the one closest to
+    <x_HI> = 0.5, and produces a two-panel figure:
+        Left:  x_HI  slice
+        Right: δTb   slice  (∝ x_HI × (1+δ) × H/(dv_r/dr + H))
+    """
+    all_redshifts = [
+        6.056, 6.113, 6.172, 6.231, 6.292, 6.354, 6.418, 6.483, 6.549,
+        6.617, 6.686, 6.757, 6.830, 6.905, 6.981, 7.059, 7.139, 7.221,
+        7.305, 7.391, 7.480, 7.570, 7.664, 7.760, 7.859, 7.960, 8.064,
+        8.172, 8.283, 8.397, 8.515, 8.636, 8.762, 8.892, 9.026, 9.164,
+        9.308, 9.457, 9.611, 9.771, 9.938, 10.110, 10.290, 10.478,
+        10.673, 10.877, 11.090, 11.313, 11.546, 11.791, 12.048
+    ]
+
+    print("\n" + "=" * 80)
+    print("Plotting: x_HI and δTb maps at midpoint of reionization")
+    print("=" * 80)
+
+    # --- find redshift closest to <x_HI> = 0.5 ---
+    best_z = None
+    best_xhi_mean = None
+    best_diff = np.inf
+    for z in all_redshifts:
+        zstr = f"{z:.3f}"
+        filenameXhi = (f"{DATA_DIR}{zstr}zeta0.389fesc0.389_Mmin0.120E+10"
+                       f"_MminX0.120E+10_fx0.100E+03_sed3_al1.200xhi.bin")
+        xhi = read_xhi(filenameXhi, n, n, n)
+        mean_xhi = float(xhi.mean())
+        diff = abs(mean_xhi - 0.5)
+        if diff < best_diff:
+            best_diff = diff
+            best_z = z
+            best_xhi_mean = mean_xhi
+        del xhi
+    print(f"  Midpoint redshift: z = {best_z:.3f}  (<x_HI> = {best_xhi_mean:.4f})")
+
+    # --- load fields at that redshift ---
+    zstr = f"{best_z:.3f}"
+    filenameDen = f"{DATA_DIR}{zstr}n_all.dat"
+    filenameXhi = (f"{DATA_DIR}{zstr}zeta0.389fesc0.389_Mmin0.120E+10"
+                   f"_MminX0.120E+10_fx0.100E+03_sed3_al1.200xhi.bin")
+    filenameVel = f"{DATA_DIR}{zstr}v_all.dat"
+
+    den = read_den(filenameDen, n, n, n).astype(np.float32)
+    xhi = read_xhi(filenameXhi, n, n, n).astype(np.float32)
+    vx, vy, vz_field = read_vel(best_z, den, filenameVel, n_cell=n)
+    vz_field *= np.float32(1.0 / 1e5)  # cm/s → km/s
+
+    mean_den = den.mean(dtype=np.float64).astype(np.float32)
+    delta = den / mean_den  # 1 + δ
+
+    # Velocity gradient term: H / (dv_r/dr + H)
+    dz_cell = BOX_MPC_OVER_H / n / LITTLEH  # Mpc per cell
+    dvdz = np.gradient(vz_field, dz_cell, axis=2).astype(np.float32)
+    H0 = 100.0 * LITTLEH
+    Hz = H0 * np.sqrt(0.27 * (1 + best_z)**3 + 0.73)
+    velocity_factor = (Hz / (dvdz + Hz)).astype(np.float32)
+
+    # δTb ∝ x_HI × (1+δ) × H/(dv_r/dr + H)
+    dTb = xhi * delta * velocity_factor
+
+    # Take a central LOS slice for the 2-D maps
+    mid = n // 2
+    xhi_slice = xhi[CENTRAL_CROP, CENTRAL_CROP, mid]
+    dTb_slice = dTb[CENTRAL_CROP, CENTRAL_CROP, mid]
+
+    # --- plot ---
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    ax = axes[0]
+    im = ax.imshow(xhi_slice, origin='lower', cmap='viridis')
+    ax.set_title(f'$x_{{HI}}$  (z = {best_z:.2f}, '
+                 f'$\\langle x_{{HI}} \\rangle$ = {best_xhi_mean:.2f})',
+                 fontsize=16)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.ax.tick_params(labelsize=18)
+
+    ax = axes[1]
+    im = ax.imshow(dTb_slice, origin='lower', cmap='RdBu_r')
+    ax.set_title(f'$\\delta T_b$  (z = {best_z:.2f}, '
+                 f'$\\langle x_{{HI}} \\rangle$ = {best_xhi_mean:.2f})',
+                 fontsize=16)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.ax.tick_params(labelsize=18)
+
+    plt.tight_layout()
+    outfile = os.path.join(output_dir, 'xhi_dTb_midpoint_reionization.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+
+    del den, xhi, vx, vy, vz_field, delta, dvdz, velocity_factor, dTb
+    gc.collect()
+
+
+def plot_mean_brightness_temp_vs_redshift(n=600, output_dir=OUTPUT_DIR):
+    """Plot mean 21cm brightness temperature vs redshift from GRIZZLY sims.
+
+    Computes δTb at each cell using:
+        δTb = 27 mK × x_HI × (1+δ) × [(1+z)/10]^0.5
+              × (Ωb h² / 0.023) × [0.15 / (Ωm h²)]^0.5
+              × H(z) / (dv_r/dr + H(z))
+    then takes the volume average ⟨δTb⟩ at each snapshot.
+    """
+    all_redshifts = [
+        6.056, 6.113, 6.172, 6.231, 6.292, 6.354, 6.418, 6.483, 6.549,
+        6.617, 6.686, 6.757, 6.830, 6.905, 6.981, 7.059, 7.139, 7.221,
+        7.305, 7.391, 7.480, 7.570, 7.664, 7.760, 7.859, 7.960, 8.064,
+        8.172, 8.283, 8.397, 8.515, 8.636, 8.762, 8.892, 9.026, 9.164,
+        9.308, 9.457, 9.611, 9.771, 9.938, 10.110, 10.290, 10.478,
+        10.673, 10.877, 11.090, 11.313, 11.546, 11.791, 12.048
+    ]
+
+    print("\n" + "=" * 80)
+    print("Plotting: Mean brightness temperature vs redshift")
+    print("=" * 80)
+
+    # Cosmological parameters (matching the rest of the pipeline)
+    h = LITTLEH           # 0.7
+    Omega_m = 0.27
+    Omega_b = 0.044
+    Omega_L = 1.0 - Omega_m
+    H0 = 100.0 * h       # km/s/Mpc
+    dz_cell_comoving = BOX_MPC_OVER_H / n / h  # comoving Mpc per cell
+
+    # Pre-factor: 27 mK × (Ωb h²/0.023) × (0.15/(Ωm h²))^0.5
+    T0 = 27.0  # mK
+    cosmo_factor = T0 * (Omega_b * h**2 / 0.023) * np.sqrt(0.15 / (Omega_m * h**2))
+
+    redshifts_out = []
+    mean_Tb_out = []
+
+    for z in all_redshifts:
+        zstr = f"{z:.3f}"
+        filenameDen = f"{DATA_DIR}{zstr}n_all.dat"
+        filenameXhi = (f"{DATA_DIR}{zstr}zeta0.389fesc0.389_Mmin0.120E+10"
+                       f"_MminX0.120E+10_fx0.100E+03_sed3_al1.200xhi.bin")
+        filenameVel = f"{DATA_DIR}{zstr}v_all.dat"
+
+        den = read_den(filenameDen, n, n, n).astype(np.float32)
+        xhi = read_xhi(filenameXhi, n, n, n).astype(np.float32)
+        vx, vy, vz_field = read_vel(z, den, filenameVel, n_cell=n)
+        vz_field *= np.float32(1.0 / 1e5)  # cm/s → km/s
+
+        mean_den = den.mean(dtype=np.float64).astype(np.float32)
+        one_plus_delta = den / mean_den  # 1 + δ
+
+        # Velocity gradient term
+        dvdz = np.gradient(vz_field, dz_cell_comoving, axis=2).astype(np.float32)
+        Hz = H0 * np.sqrt(Omega_m * (1 + z)**3 + Omega_L)
+        vel_factor = (Hz / (dvdz + Hz)).astype(np.float32)
+
+        # Full δTb field [mK]
+        z_factor = np.sqrt((1.0 + z) / 10.0)
+        dTb = cosmo_factor * z_factor * xhi * one_plus_delta * vel_factor
+        mean_Tb = float(dTb.mean())
+
+        redshifts_out.append(z)
+        mean_Tb_out.append(mean_Tb)
+        print(f"  z = {z:7.3f}  <x_HI> = {xhi.mean():.4f}  <δTb> = {mean_Tb:.3f} mK")
+
+        del den, xhi, vx, vy, vz_field, one_plus_delta, dvdz, vel_factor, dTb
+        gc.collect()
+
+    redshifts_out = np.array(redshifts_out)
+    mean_Tb_out = np.array(mean_Tb_out)
+
+    # --- plot ---
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(redshifts_out, mean_Tb_out, 'o-', color='C0', markersize=4, lw=1.5)
+    ax.set_xlabel('Redshift $z$', fontsize=22)
+    ax.set_ylabel('$\\langle \\delta T_b \\rangle$ [mK]', fontsize=22)
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    ax.grid(True, alpha=0.3)
+    ax.invert_xaxis()
+
+    plt.tight_layout()
+    outfile = os.path.join(output_dir, 'mean_brightness_temp_vs_redshift.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+
+    return redshifts_out, mean_Tb_out
+
+
+def plot_true_vs_reconstructed_ksz_maps(z_high=12.048, z_low=6.905,
+                                         output_dir=OUTPUT_DIR):
+    """2x2 grid comparing true and reconstructed kSZ maps at two redshifts.
+
+    Top row: z=z_high (pre-reionization, ⟨x_HI⟩~1).
+    Bottom row: z=z_low (midpoint, ⟨x_HI⟩~0.5).
+    Columns: True kSZ | Reconstructed kSZ.
+    Each row has its own shared colorbar; both rows share identical
+    Mpc/h tick spacing on x and y.
+    """
+    from matplotlib.gridspec import GridSpec
+
+    print("\n" + "=" * 80)
+    print("Plotting: True vs Reconstructed kSZ maps (2x2)")
+    print("=" * 80)
+
+    redshifts = [z_high, z_low]
+    panels = []
+
+    for z in redshifts:
+        (den, xhi, _, _, vz, _, _, _, _, _, vz_recx, *_) = reconstruct_velocities(z)
+        den_c = den[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
+        xhi_c = xhi[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
+        vz_c = vz[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
+        vz_recx_c = vz_recx[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
+        mean_xhi = float(xhi_c.mean())
+
+        ksz_real = compute_ksz_maps(vz_c, xhi_c, den_c,
+                                     z=z, physical_norm=PHYSICAL_NORM)
+        ksz_rec = compute_ksz_maps(vz_recx_c, xhi_c, den_c,
+                                    z=z, physical_norm=PHYSICAL_NORM)
+        r = pearson_r(ksz_real, ksz_rec)
+
+        panels.append({
+            'z': z, 'mean_xhi': mean_xhi,
+            'ksz_real': ksz_real, 'ksz_rec': ksz_rec, 'r': r,
+        })
+        print(f"  z={z:6.3f}  ⟨x_HI⟩={mean_xhi:.3f}  r={r:+.3f}")
+
+        del den, xhi, vz, vz_recx, den_c, xhi_c, vz_c, vz_recx_c
+        gc.collect()
+
+    # Physical extent of central crop (Mpc/h)
+    n_crop = CENTRAL_CROP.stop - CENTRAL_CROP.start
+    L = BOX_MPC_OVER_H * n_crop / 600.0
+    extent = [0, L, 0, L]
+    ticks = [0, 100, 200, 300, 400]
+
+    fig = plt.figure(figsize=(11, 10))
+    gs = GridSpec(2, 3, width_ratios=[1, 1, 0.05],
+                  hspace=0.18, wspace=0.08)
+
+    for row, d in enumerate(panels):
+        vmax = float(np.percentile(
+            np.abs(np.concatenate([d['ksz_real'].ravel(),
+                                   d['ksz_rec'].ravel()])), 99))
+
+        ax_true = fig.add_subplot(gs[row, 0])
+        im = ax_true.imshow(d['ksz_real'], origin='lower', cmap='RdBu_r',
+                            vmin=-vmax, vmax=vmax, extent=extent)
+        if row == 0:
+            ax_true.set_title('True kSZ', fontsize=22)
+        ax_true.set_ylabel(
+            f"z = {d['z']:.1f}, "
+            f"$\\langle x_{{HI}} \\rangle$ = {d['mean_xhi']:.2f}\n"
+            "y [Mpc/$h$]",
+            fontsize=18,
+        )
+        ax_true.set_xlabel('x [Mpc/$h$]', fontsize=18)
+        ax_true.set_xticks(ticks); ax_true.set_yticks(ticks)
+        ax_true.tick_params(axis='both', which='major', labelsize=16)
+
+        ax_rec = fig.add_subplot(gs[row, 1])
+        im_rec = ax_rec.imshow(d['ksz_rec'], origin='lower', cmap='RdBu_r',
+                                vmin=-vmax, vmax=vmax, extent=extent)
+        if row == 0:
+            ax_rec.set_title('Reconstructed kSZ', fontsize=22)
+        ax_rec.set_xlabel('x [Mpc/$h$]', fontsize=18)
+        ax_rec.set_xticks(ticks); ax_rec.set_yticks(ticks)
+        ax_rec.set_yticklabels([])
+        ax_rec.tick_params(axis='both', which='major', labelsize=16)
+        ax_rec.text(0.97, 0.05, f"r = {d['r']:.2f}",
+                    transform=ax_rec.transAxes,
+                    fontsize=16, ha='right', va='bottom',
+                    bbox=dict(boxstyle='round,pad=0.3',
+                              facecolor='white', edgecolor='black',
+                              alpha=0.9))
+
+        cax = fig.add_subplot(gs[row, 2])
+        cbar = plt.colorbar(im_rec, cax=cax)
+        cbar.set_label('$\\Delta T_{\\mathrm{kSZ}}$ [$\\mu$K]', fontsize=18)
+        cbar.ax.tick_params(labelsize=14)
+
+    outfile = os.path.join(output_dir, 'ksz_maps_true_vs_reconstructed.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+
+
+def plot_mean_brightness_temp_vs_redshift_21cmfast(sim_id=12701, output_dir=OUTPUT_DIR):
+    """Plot mean 21cm brightness temperature vs redshift from 21cmFAST sims.
+
+    Uses the pre-computed Tb lightcone (USE_TS_FLUCT=True), so the signal
+    includes spin temperature fluctuations (absorption trough at Cosmic
+    Dawn, heating transition, etc.).
+    """
+    data_dir = os.path.join(PROJECT_ROOT, "data_21cmfast")
+    Tb_file = os.path.join(data_dir, "Tb", f"{sim_id}_Tb_LC.npy")
+    z_file = os.path.join(data_dir, "lightcone_redshifts.npy")
+
+    print("\n" + "=" * 80)
+    print(f"Plotting: Mean δTb vs redshift (21cmFAST sim {sim_id})")
+    print("=" * 80)
+
+    Tb = np.load(Tb_file, mmap_mode='r')
+    z = np.load(z_file)
+    print(f"  Tb lightcone shape: {Tb.shape},  z range: [{z.min():.2f}, {z.max():.2f}]")
+
+    # Mean over the transverse (x, y) plane at each LOS slice
+    mean_Tb = Tb.reshape(-1, Tb.shape[-1]).mean(axis=0).astype(np.float64)
+    print(f"  <δTb> range: [{mean_Tb.min():.2f}, {mean_Tb.max():.2f}] mK")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(z, mean_Tb, '-', color='C1', lw=1.5)
+    ax.axhline(0, color='grey', ls='--', lw=0.8, alpha=0.6)
+    ax.set_xlabel('Redshift $z$', fontsize=22)
+    ax.set_ylabel('$\\langle \\delta T_b \\rangle$ [mK]', fontsize=22)
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    ax.grid(True, alpha=0.3)
+    ax.invert_xaxis()
+
+    plt.tight_layout()
+    outfile = os.path.join(output_dir, f'mean_brightness_temp_vs_redshift_21cmfast_{sim_id}.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+
+    return z, mean_Tb
+
+
+def _reconstruct_vz_21cmfast_chunk(den_chunk, xhi_chunk, z_ref,
+                                   box_mpc_over_h=300.0, littleh=LITTLEH,
+                                   include_velocity_term=False,
+                                   vz_for_gradient=None):
+    """Linear-continuity reconstruction of vz on a 21cmFAST chunk.
+
+    den_chunk: overdensity δ (as stored in 21cmFAST LC files, mean ≈ 0).
+    Returns vz_rec in km/s.
+    """
+    nx, ny, nz = den_chunk.shape
+    delta = den_chunk.astype(np.float32, copy=False)
+    xhi = xhi_chunk.astype(np.float32, copy=False)
+
+    # Tracer field ∝ x_HI × (1+δ)  (optionally × velocity-gradient factor)
+    tracer = (1.0 + delta) * xhi
+    if include_velocity_term and vz_for_gradient is not None:
+        dz_cell = box_mpc_over_h / nz / littleh  # Mpc per cell
+        dvdz = np.gradient(vz_for_gradient.astype(np.float32),
+                            dz_cell, axis=2)
+        H0 = 100.0 * littleh
+        Hz = H0 * np.sqrt(0.27 * (1 + z_ref)**3 + 0.73)
+        tracer = tracer * (Hz / (dvdz + Hz)).astype(np.float32)
+    tracer = tracer - tracer.mean()
+
+    dlt_r = fft.rfftn(tracer, workers=-1).astype(np.complex64)
+
+    rc = box_mpc_over_h / float(nx) / littleh  # Mpc/cell (physical)
+    kx = (2 * np.pi * fft.fftfreq(nx, d=rc)).astype(np.float32)
+    ky = (2 * np.pi * fft.fftfreq(ny, d=rc)).astype(np.float32)
+    kz = (2 * np.pi * fft.rfftfreq(nz, d=rc)).astype(np.float32)
+    tiny = np.finfo(np.float32).tiny
+    kx[0] = max(kx[0], tiny); ky[0] = max(ky[0], tiny); kz[0] = max(kz[0], tiny)
+
+    a = 1.0 / (1.0 + z_ref)
+    H0 = 100.0 * littleh
+    Ha = np.float32(H0 * np.sqrt(0.27 / a**3 + 0.73))
+    Omega_m_a = (0.27 / a**3) / (0.27 / a**3 + 0.73)
+    f_omega = np.float32(Omega_m_a**0.55)
+    factor = np.complex64(Ha * a * f_omega) * 1j
+
+    absk2 = (kx * kx)[:, None, None] + (ky * ky)[None, :, None] + (kz * kz)[None, None, :]
+    tmp = dlt_r * factor * kz[None, None, :]
+    np.divide(tmp, absk2, out=tmp, where=absk2 != 0)
+    vz_rec = safe_real(fft.irfftn(tmp, s=(nx, ny, nz), workers=-1))
+    return vz_rec
+
+
+def run_21cmfast_chunked_reconstruction(sim_id=12701, chunk_size=200,
+                                        physical_norm=True,
+                                        output_dir=OUTPUT_DIR):
+    """Full reconstruction + cross-correlation pipeline for a 21cmFAST LC.
+
+    Chunks the lightcone along the LOS axis and, per chunk, performs:
+        - velocity reconstruction from (1+δ)·x_HI via linear continuity
+        - kSZ maps from real and reconstructed velocities
+        - Pearson r between real and reconstructed kSZ
+
+    Produces:
+        - <output_dir>/ksz_reconstruction_21cmfast_<sim_id>_rVsXhi.png
+        - <output_dir>/ksz_reconstruction_21cmfast_<sim_id>_integrated_maps.png
+    """
+    data_dir = os.path.join(PROJECT_ROOT, "data_21cmfast")
+    den = np.load(os.path.join(data_dir, "density", f"{sim_id}_density_LC.npy"),
+                  mmap_mode='r')
+    xhi = np.load(os.path.join(data_dir, "xHI", f"{sim_id}_xHI_LC.npy"),
+                  mmap_mode='r')
+    vz = np.load(os.path.join(data_dir, "velocity", f"{sim_id}_velocity_z_LC.npy"),
+                 mmap_mode='r')
+    z_lc = np.load(os.path.join(data_dir, "lightcone_redshifts.npy"))
+
+    nx, ny, nz_lc = den.shape
+    print("\n" + "=" * 80)
+    print(f"21cmFAST reconstruction pipeline (sim {sim_id})")
+    print("=" * 80)
+    print(f"  LC shape: {den.shape},  z range: [{z_lc.min():.2f}, {z_lc.max():.2f}]")
+
+    # Physical prefactor (for µK units). vz stored in km/s in py21cmfast LC.
+    # (If not, the amplitude will be off, but the correlation r is unchanged.)
+    H0 = 100.0 * LITTLEH
+    BOX = 300.0  # Mpc/h (21cmFAST box length)
+
+    n_chunks = nz_lc // chunk_size
+    print(f"  Chunking along LOS: {n_chunks} chunks of {chunk_size} slices each")
+
+    mean_xhi_per_chunk = []
+    mean_z_per_chunk = []
+    r_per_chunk = []
+    ksz_real_integrated = None
+    ksz_rec_integrated = None
+
+    for i in range(n_chunks):
+        s, e = i * chunk_size, (i + 1) * chunk_size
+        z_chunk = z_lc[s:e]
+        z_ref = float(z_chunk.mean())
+
+        # Load chunk into RAM (not mmap'd slice) so FFTs work fast
+        den_c = np.ascontiguousarray(den[:, :, s:e])
+        xhi_c = np.ascontiguousarray(xhi[:, :, s:e])
+        vz_c = np.ascontiguousarray(vz[:, :, s:e])
+
+        mean_xhi = float(xhi_c.mean())
+        mean_xhi_per_chunk.append(mean_xhi)
+        mean_z_per_chunk.append(z_ref)
+
+        # Skip fully ionised / fully neutral chunks (reconstruction degenerate)
+        if mean_xhi < 1e-3 or mean_xhi > 1.0 - 1e-3:
+            print(f"  Chunk {i+1:2d}/{n_chunks}: z̄={z_ref:6.3f}  "
+                  f"<x_HI>={mean_xhi:.4f}  -> skipped (edge of EoR)")
+            r_per_chunk.append(np.nan)
+            continue
+
+        # Reconstruct vz from (1+δ)·x_HI
+        vz_rec = _reconstruct_vz_21cmfast_chunk(den_c, xhi_c, z_ref,
+                                                box_mpc_over_h=BOX)
+
+        # kSZ maps: ΔT ∝ Σ x_e (1+δ) v_r
+        # Using the 21cmFAST convention: den = δ (so 1+δ = 1+δ)
+        xe_delta = (1.0 - xhi_c) * (1.0 + den_c)
+
+        if physical_norm:
+            sigma_T = 6.6524587158e-25
+            c_cm_s = 2.99792458e10
+            T_CMB = 2.725e6  # µK
+            m_p = 1.6726219e-24
+            Mpc_to_cm = 3.085677581e24
+            Omega_b = 0.044
+            H0_cgs = 100.0 * LITTLEH * 1e5 / Mpc_to_cm
+            G_cgs = 6.67430e-8
+            rho_crit = 3 * H0_cgs**2 / (8 * np.pi * G_cgs)
+            n_e0 = Omega_b * rho_crit / m_p * (1.0 - 0.24 / 2.0)
+            n_e_z = n_e0 * (1 + z_ref)**3
+            dl_proper = (BOX / LITTLEH / (1 + z_ref)) / nx * Mpc_to_cm
+            pref = -T_CMB * sigma_T * n_e_z * dl_proper / c_cm_s * 1e5  # v in km/s
+        else:
+            pref = 1.0
+
+        ksz_real_c = pref * (xe_delta * vz_c).sum(axis=2)
+        ksz_rec_c = pref * (xe_delta * vz_rec).sum(axis=2)
+
+        r = pearson_r(ksz_real_c, ksz_rec_c)
+        r_per_chunk.append(r)
+
+        if ksz_real_integrated is None:
+            ksz_real_integrated = ksz_real_c.copy()
+            ksz_rec_integrated = ksz_rec_c.copy()
+        else:
+            ksz_real_integrated += ksz_real_c
+            ksz_rec_integrated += ksz_rec_c
+
+        print(f"  Chunk {i+1:2d}/{n_chunks}: z̄={z_ref:6.3f}  "
+              f"<x_HI>={mean_xhi:.4f}  r={r:+.4f}")
+
+        del den_c, xhi_c, vz_c, vz_rec, xe_delta, ksz_real_c, ksz_rec_c
+        gc.collect()
+
+    mean_xhi_per_chunk = np.array(mean_xhi_per_chunk)
+    mean_z_per_chunk = np.array(mean_z_per_chunk)
+    r_per_chunk = np.array(r_per_chunk)
+
+    # Integrated correlation
+    r_integrated = pearson_r(ksz_real_integrated, ksz_rec_integrated)
+    print(f"\n  Integrated Pearson r = {r_integrated:+.4f}")
+
+    # ------------------------------------------------------------------
+    # PLOT 1: r vs <x_HI>, coloured by z
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(8, 5))
+    valid = np.isfinite(r_per_chunk)
+    sc = ax.scatter(mean_xhi_per_chunk[valid], r_per_chunk[valid],
+                    c=mean_z_per_chunk[valid], cmap='viridis', s=60, zorder=5)
+    ax.plot(mean_xhi_per_chunk[valid], r_per_chunk[valid],
+            '--', color='gray', lw=1, alpha=0.5, zorder=1)
+    ax.axhline(0, color='black', lw=0.8, alpha=0.5)
+    cbar = plt.colorbar(sc, ax=ax)
+    cbar.set_label('Redshift $z$', fontsize=18)
+    cbar.ax.tick_params(labelsize=14)
+    ax.set_xlabel('Neutral Fraction $\\langle x_{HI} \\rangle$', fontsize=22)
+    ax.set_ylabel('Pearson $r$ (real vs rec kSZ)', fontsize=22)
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    ax.set_ylim([-1.05, 1.05])
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    outfile = os.path.join(output_dir,
+                           f'ksz_reconstruction_21cmfast_{sim_id}_rVsXhi.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+
+    # ------------------------------------------------------------------
+    # PLOT 2: Integrated real vs reconstructed kSZ maps
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    ax = axes[0]
+    im = ax.imshow(ksz_real_integrated, origin='lower', cmap='RdBu_r')
+    ax.set_title(f'Integrated real kSZ (r$_{{int}}$ = {r_integrated:+.3f})',
+                 fontsize=16)
+    ax.set_xticks([]); ax.set_yticks([])
+    cbar = plt.colorbar(im, ax=ax); cbar.ax.tick_params(labelsize=14)
+
+    ax = axes[1]
+    im = ax.imshow(ksz_rec_integrated, origin='lower', cmap='RdBu_r')
+    ax.set_title('Integrated reconstructed kSZ', fontsize=16)
+    ax.set_xticks([]); ax.set_yticks([])
+    cbar = plt.colorbar(im, ax=ax); cbar.ax.tick_params(labelsize=14)
+
+    plt.tight_layout()
+    outfile = os.path.join(output_dir,
+                           f'ksz_reconstruction_21cmfast_{sim_id}_integrated_maps.png')
+    plt.savefig(outfile, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {outfile}")
+
+    return {
+        'mean_xhi': mean_xhi_per_chunk,
+        'mean_z': mean_z_per_chunk,
+        'r': r_per_chunk,
+        'r_integrated': r_integrated,
+        'ksz_real_integrated': ksz_real_integrated,
+        'ksz_rec_integrated': ksz_rec_integrated,
+    }
 
 
 def comoving_distance(z, H0=70, Om=0.27):
@@ -2676,18 +4005,18 @@ def analyze_single_redshift(z, n=600):
     # 3D velocity correlations
     r_3d = pearson_r(vz, -vz_recx)
     print(f"  3D velocity correlation: {r_3d:.4f}")
-    
+
     # 2D map correlations (LOS already cropped in 3D fields)
     vz_map = np.sum(vz, axis=2)
     vz_rec_map = np.sum(-vz_recx, axis=2)
     r_2d = pearson_r(vz_map, vz_rec_map)
     print(f"  2D map correlation: {r_2d:.4f}")
-    
+
     # Fourier velocity correlation (2D integrated velocity maps)
     k_values_vel_2d, r_k_vel_2d = compute_fourier_correlation_coefficient(
         vz_map, vz_rec_map, boxlength=[Ly, Lx]
     )
-    
+
     # Fourier velocity correlation (3D fields)
     box_size_crop = dx * n_crop  # Box size for cropped region in Mpc/h
     k_values_vel_3d, r_k_vel_3d = compute_fourier_correlation_coefficient_3d(
@@ -2695,6 +4024,20 @@ def analyze_single_redshift(z, n=600):
     )
     print(f"  3D Fourier r(k=0.1): {np.interp(0.1, k_values_vel_3d, r_k_vel_3d):.4f}")
     print(f"  2D Fourier r(k=0.1): {np.interp(0.1, k_values_vel_2d, r_k_vel_2d):.4f}")
+
+    # ---- Spatial jackknife on velocity correlations ---------------------
+    # 3D: 2×2×2 = 8 octants; 2D map: 2×2 = 4 transverse tiles.
+    _, r_3d_jk_sigma, _ = jackknife_pearson_r(vz, -vz_recx, n_per_side=2)
+    _, r_2d_jk_sigma, _ = jackknife_pearson_r(vz_map, vz_rec_map, n_per_side=2)
+    _, _, r_k_vel_3d_jk_sigma = jackknife_r_k_3d(
+        vz, -vz_recx, boxlength=box_size_crop,
+        n_per_side=2, k_grid=k_values_vel_3d
+    )
+    _, _, r_k_vel_2d_jk_sigma = jackknife_r_k_2d(
+        vz_map, vz_rec_map, boxlength=[Ly, Lx],
+        n_per_side=2, k_grid=k_values_vel_2d
+    )
+    print(f"  Jackknife σ (3D, 2D): {r_3d_jk_sigma:.4f}, {r_2d_jk_sigma:.4f}")
     
     # kSZ maps - unsmoothed
     ksz_map = compute_ksz_maps(vz, xhi, den, z=z, physical_norm=PHYSICAL_NORM)
@@ -2730,6 +4073,8 @@ def analyze_single_redshift(z, n=600):
         'mean_xHI': mean_xHI,
         'r_3d': r_3d,
         'r_2d': r_2d,
+        'r_3d_jk_sigma': r_3d_jk_sigma,
+        'r_2d_jk_sigma': r_2d_jk_sigma,
         'r_ksz_unsmooth': r_ksz_unsmooth,
         'r_ksz_smooth': r_ksz_smooth,
         'k_values': k_values,
@@ -2741,7 +4086,9 @@ def analyze_single_redshift(z, n=600):
         'k_values_vel_2d': k_values_vel_2d,
         'r_k_vel_2d': r_k_vel_2d,
         'k_values_vel_3d': k_values_vel_3d,
-        'r_k_vel_3d': r_k_vel_3d
+        'r_k_vel_3d': r_k_vel_3d,
+        'r_k_vel_2d_jk_sigma': r_k_vel_2d_jk_sigma,
+        'r_k_vel_3d_jk_sigma': r_k_vel_3d_jk_sigma,
     }
     
     # Clean up
@@ -2790,6 +4137,7 @@ def main(redshifts=None):
     
     plot_velocity_correlation_vs_neutral_fraction(all_results)
     plot_velocity_correlation_combined(all_results)
+    plot_velocity_correlation_jk(all_results)
     
     # 2D velocity scatter plot for a representative redshift (xHI ~ 0.5)
     target_xHI = 0.5
@@ -2815,7 +4163,19 @@ def main(redshifts=None):
     # plot_ksz_correlation_vs_neutral_fraction(all_results)
     # plot_ksz_scale_dependence_and_ell3000(all_results)
     # plot_ksz_power_paper_figure(all_results)
-    analyze_stitched_full_ksz_vs_individual()
+    cross_corr_results = analyze_stitched_full_ksz_vs_individual()
+    if cross_corr_results is not None:
+        plot_cross_correlator_evolution_jk(cross_corr_results)
+    
+    # =========================================================================
+    # R(k,z) — ionisation-to-density ratio measurement
+    # =========================================================================
+    # Measures R(k,z) = P_{δx_HI, δ}(k) / [x̄_HI · P_{δδ}(k)]
+    # and plots 1+R vs neutral fraction (with redshift colorbar)
+    # plus R(k) vs k at selected redshifts.
+    R_kz_results = measure_R_kz_all(redshifts)
+    plot_one_plus_R_vs_neutral_fraction(R_kz_results)
+    plot_R_kz_vs_k(R_kz_results)
     
     # =========================================================================
     # 21cm NORMALIZATION STUDY
