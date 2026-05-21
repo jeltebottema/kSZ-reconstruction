@@ -42,3 +42,21 @@ committed to `main`. Defines:
 
 Genuinely different architecture from the script-style `generate_all_plots.py`.
 Kept as a reference if a class-based refactor is revived.
+
+### `notebooks/`
+
+Pre-paper-finalisation notebooks superseded by `functions/generate_all_plots.py`:
+
+- `ksz_rec single z.ipynb` — genesis notebook (Nov 2025), single-redshift
+  reconstruction prototype with inline `read_den` / `read_xhi` / `read_vel`.
+  Cell 1 markdown captures the original direction: *"focus on rec ksz to ksz
+  as cross correlater in the EoR."* Pre-dates `generate_all_plots.py`.
+- `make_plots.ipynb` (Dec 2025) — defined `reconstruct_velocities(z, ...)`
+  inline; that function is now canonical in `generate_all_plots.py:278`.
+  Dutch helper-function comments.
+
+### `plots_grizzly/` (filesystem-only, not tracked)
+
+Grizzly-side plot directory whose emitter files (`plot_21cm_filter.py`,
+`ksz_21cmfast_simulated_wedge_filtered.py`, etc.) were retired in the same
+cleanup pass. Kept for reference; nothing in tree regenerates them.
