@@ -1,0 +1,14 @@
+[project]
+name = "non-gaussian"
+version = "0.1.0"
+description = "Exploratory kSZ non-Gaussianity analyses (Will collaboration, scope still being defined)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ksz-core",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.5",
+    "powerbox>=0.8",
+    "jupyter>=1.0",
+]

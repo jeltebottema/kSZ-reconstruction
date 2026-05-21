@@ -1,20 +1,17 @@
 [project]
 name = "noise-analysis"
 version = "0.1.0"
-description = "Add your description here"
+description = "Noise modelling for the kSZ × 21cm pipeline: HERA / SKA-low (via py21cmsense), GRIZZLY loaders."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "ksz-core",
     "21cmsense",
+    "tuesday-eor",
     "astropy>=7.2.0",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.8",
     "numpy>=2.4.4",
     "powerbox>=0.8.3.dev105",
     "scipy>=1.17.1",
-    "tuesday-eor",
 ]
-
-[tool.uv.sources]
-21cmsense = { git = "https://github.com/rasg-affiliates/21cmSense", rev = "fast-hist" }
-tuesday-eor = { git = "https://github.com/21cmfast/tuesday", rev = "coeval-obs" }

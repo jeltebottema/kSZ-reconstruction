@@ -1,0 +1,24 @@
+[project]
+name = "ksz-reconstruction-monorepo"
+version = "0.1.0"
+description = "Monorepo for the kSZ × 21cm research stack: paper code, noise analysis, ML reconstruction, non-Gaussianity exploration, and the shared ksz_core package."
+requires-python = ">=3.11"
+# This root project is a thin shell — install members via uv workspace.
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+    "ksz_core",
+    "ksz_reconstruction",
+    "noise_analysis",
+    "noisy_reconstruction",
+    "non_gaussian",
+]
+
+# Shared git sources for 21cmsense + tuesday-eor — declared once at workspace root
+# (uv only honours [tool.uv.sources] at workspace root for member packages).
+[tool.uv.sources]
+ksz-core = { workspace = true }
+noise-analysis = { workspace = true }
+"21cmsense" = { git = "https://github.com/rasg-affiliates/21cmSense", rev = "fast-hist" }
+"tuesday-eor" = { git = "https://github.com/21cmfast/tuesday", rev = "coeval-obs" }
