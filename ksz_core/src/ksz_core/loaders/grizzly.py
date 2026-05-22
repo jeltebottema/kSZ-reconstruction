@@ -21,7 +21,7 @@ BOX_MPC_H = 500.0
 H_LITTLE = 0.7
 BOX_LEN_MPC = BOX_MPC_H / H_LITTLE            # ~714.3 Mpc
 OMEGA_M = 0.27
-OMEGA_B = 0.045
+OMEGA_B = 0.044     # Shaw et al. 2025 §1 (arXiv:2409.03255), "adapted from Hinshaw et al. 2013"
 NC_PM = 13824                                   # PM grid for velocity unit
 
 CROP = slice(30, 570)                            # central 540³

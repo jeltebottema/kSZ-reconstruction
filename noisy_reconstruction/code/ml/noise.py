@@ -6,104 +6,41 @@ HERA observational noise for 21cm coeval cubes, via
     tuesday.core.observe_coeval
 
 This follows the exact pattern used in
-`noise_analysis/notebooks/04_grizzly_uv_sweep.ipynb`:
+`noise_analysis/notebooks/04_grizzly_uv_sweep.ipynb`. `observe_coeval`
+handles uv-sampling + thermal noise, returning a noisy observed Tb cube.
 
-    observed = observe_coeval(
-        box = bt * un.mK,
-        box_length = BOX_LEN * un.Mpc,
-        observation = obs,
-        redshift = z,
-        nrealizations = 1,
-        remove_wedge = False,
-        seed = seed,
-    )
-    bt_noisy = observed[0].to(un.mK).value.astype(np.float32)
-    bt_noisy = np.nan_to_num(bt_noisy, nan=0.0, posinf=0.0, neginf=0.0)
-
-`observe_coeval` handles *both*:
-    - uv-sampling through HERA baselines (modes without coverage → NaN/0)
-    - thermal noise consistent with the Observation settings
-so the returned cube is already the noisy observed Tb — no separate
-"add noise" step is needed.
-
-The HERA `Observation` object is built via
-`noise_analysis/src/noise_filters.build_hera_observation`, so the ML
-pipeline and the Wiener-filter work share one source of truth.
+The HERA `Observation` object is built via `ksz_core.noise.hera.
+build_hera_observation` — single source of truth shared with the
+Wiener-filter / paper pipeline.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 from astropy import units as un
+
+from ksz_core.noise.hera import build_hera_observation
 
 from .config import DemoConfig
 
 
-# -----------------------------------------------------------------------------
-# Import build_hera_observation from noise_analysis (single source of truth)
-# -----------------------------------------------------------------------------
-def _import_build_hera():
-    candidates = [
-        Path(__file__).resolve().parents[3] / "noise_analysis" / "src",
-    ]
-    for p in candidates:
-        if p.exists() and str(p) not in sys.path:
-            sys.path.insert(0, str(p))
-    try:
-        from noise_filters import build_hera_observation  # type: ignore
-        return build_hera_observation
-    except Exception:
-        return None
-
-
 def build_observation(cfg: DemoConfig):
-    """Return (observatory, observation, antpos) for cfg.survey.
-
-    Uses noise_analysis.src.noise_filters.build_hera_observation when
-    available; falls back to a local rebuild with identical defaults.
-    """
+    """Return (observatory, observation, antpos) for cfg.survey via ksz_core."""
     if cfg.survey != "HERA":
         raise NotImplementedError(
             f"survey={cfg.survey!r} not wired up yet; use 'HERA' for the demo."
         )
 
-    builder = _import_build_hera()
-    if builder is not None:
-        return builder(
-            hex_num=cfg.hera_hex_num,
-            split_core=cfg.hera_split_core,
-            outriggers=cfg.hera_outriggers,
-            dish_size_m=cfg.hera_dish_size_m,
-            latitude_deg=cfg.hera_latitude_deg,
-            track_hours=cfg.track_hours,
-            time_per_day_hours=cfg.time_per_day_hours,
-            n_days=cfg.n_days,
-        )
-
-    # Local fallback — identical defaults to noise_filters.build_hera_observation
-    from py21cmsense import Observatory, Observation, GaussianBeam
-    from py21cmsense.antpos import hera as hera_antpos_fn
-
-    antpos = hera_antpos_fn(
+    return build_hera_observation(
         hex_num=cfg.hera_hex_num,
         split_core=cfg.hera_split_core,
         outriggers=cfg.hera_outriggers,
-    )
-    observatory = Observatory(
-        antpos=antpos,
-        latitude=cfg.hera_latitude_deg * un.deg,
-        beam=GaussianBeam(dish_size=cfg.hera_dish_size_m * un.m),
-    )
-    obs = Observation(
-        observatory=observatory,
-        track=cfg.track_hours * un.hour,
-        time_per_day=cfg.time_per_day_hours * un.hour,
+        dish_size_m=cfg.hera_dish_size_m,
+        latitude_deg=cfg.hera_latitude_deg,
+        track_hours=cfg.track_hours,
+        time_per_day_hours=cfg.time_per_day_hours,
         n_days=cfg.n_days,
     )
-    return observatory, obs, antpos
 
 
 # -----------------------------------------------------------------------------
