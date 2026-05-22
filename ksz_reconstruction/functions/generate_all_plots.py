@@ -2161,7 +2161,7 @@ def plot_one_plus_R_vs_neutral_fraction(R_results, output_dir=OUTPUT_DIR):
 
 
 def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51,
-                                             lightcone_slab=True):
+                                             lightcone_slab=False):
     """Stitch real kSZ from multiple coeval boxes and compare to individual
     reconstructions.
 
@@ -2170,7 +2170,9 @@ def analyze_stitched_full_ksz_vs_individual(redshifts_stitch=None, n_stitch=51,
     Parameters
     ----------
     lightcone_slab : bool
-        If True (default), use the thin-slab lightcone approximation.
+        If True, use the thin-slab lightcone approximation.
+        If False (default, as of 2026-05-22), each coeval box is treated as a
+        full coeval cube — no lightcone slabbing.
 
         PROBLEM WITH NAIVE STACKING
         ---------------------------
