@@ -9,6 +9,7 @@ import pytest
 from ksz_core.cosmology import (
     Constants,
     H,
+    chi_mpch,
     comoving_distance,
     compute_dtau_dz,
     compute_tau_0_to_z,
@@ -95,6 +96,61 @@ def test_comoving_distance_planck_at_z2_matches_astropy():
     cosmo = FlatLambdaCDM(H0=c.H0, Om0=c.Om0)
     expected = cosmo.comoving_distance(2.0).to("Mpc").value
     assert comoving_distance(2.0, c) == pytest.approx(expected, rel=1e-4)
+
+
+# ── chi_mpch + k_to_ell unit-convention regression tests ─────────────────────
+# These pin the Limber identity ℓ = k · χ with k in h/Mpc and χ in Mpc/h, per
+# Dodelson 2nd ed., eq. 11.66. Mixing units (k h/Mpc × χ Mpc) introduces a
+# spurious factor of h — these tests would catch that.
+
+def test_chi_mpch_is_chi_times_h():
+    """χ_mpch = h · χ_mpc (definitional)."""
+    c = Constants.paper_fiducial()
+    z = 8.0
+    assert chi_mpch(z, c) == pytest.approx(c.h * comoving_distance(z, c), rel=1e-12)
+
+
+def test_chi_mpch_paper_fiducial_known_value():
+    """At z=8 with paper cosmology, χ in Mpc/h is ~6495.
+
+    Independently: paper-cosmology χ in Mpc at z=8 is 9278.6 (verified against
+    astropy elsewhere); multiplying by h=0.7 gives 6495.0 Mpc/h.
+    """
+    c = Constants.paper_fiducial()
+    assert chi_mpch(8.0, c) == pytest.approx(9278.61 * 0.7, rel=1e-3)
+
+
+def test_k_to_ell_uses_h_consistent_units():
+    """ℓ = k · χ_mpch (NOT k · χ_mpc).
+
+    Concrete: at paper cosmology, z=8, k=0.1 h/Mpc, ℓ should be 0.1 × 6495 ≈ 649.5.
+    If someone accidentally used χ in Mpc, they'd get 0.1 × 9278.6 ≈ 928 — off by 1/h.
+    """
+    c = Constants.paper_fiducial()
+    z = 8.0
+    k = 0.1   # h/Mpc
+
+    ell_correct = k_to_ell(k, z, c)
+    ell_wrong = k * comoving_distance(z, c)  # k h/Mpc × χ Mpc — buggy mix
+
+    assert ell_correct == pytest.approx(649.5, rel=2e-3)
+    assert ell_wrong == pytest.approx(927.9, rel=2e-3)
+    assert ell_wrong / ell_correct == pytest.approx(1.0 / c.h, rel=1e-6)
+
+
+def test_k_to_ell_round_trip_against_astropy():
+    """Cross-check ℓ at z=1 against astropy + the textbook formula."""
+    pytest.importorskip("astropy")
+    from astropy.cosmology import FlatLambdaCDM
+
+    c = Constants.paper_fiducial()
+    cosmo = FlatLambdaCDM(H0=c.H0, Om0=c.Om0)
+    z = 1.0
+    chi_mpc_astropy = cosmo.comoving_distance(z).to("Mpc").value
+    chi_mpch_expected = c.h * chi_mpc_astropy
+    k = 0.2  # h/Mpc
+
+    assert k_to_ell(k, z, c) == pytest.approx(k * chi_mpch_expected, rel=1e-3)
 
 
 def test_comoving_distance_paper_fiducial_at_z6_matches_astropy():

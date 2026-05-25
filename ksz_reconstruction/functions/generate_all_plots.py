@@ -14,6 +14,16 @@ from scipy.stats import pearsonr
 from powerbox import get_power
 import gc
 from matplotlib.lines import Line2D
+
+# ksz_core is the single source of truth for cosmology (Limber unit convention).
+# Paper-code wrappers below preserve the old signatures but delegate to ksz_core.
+from ksz_core.cosmology import (
+    Constants as _KSZ_Constants,
+    chi_mpch as _ksz_chi_mpch,
+    k_to_ell as _ksz_k_to_ell,
+)
+
+_PAPER_COSMO = _KSZ_Constants.paper_fiducial()  # H0=70, Om0=0.27, h=0.7
  
 LITTLEH = 0.7
 BOX_MPC_OVER_H = 500.0
@@ -61,7 +71,7 @@ T_REF_MK = 10.0  # Reference temperature for fixed-scale normalization [mK]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # Go up one level from functions/
 DATA_DIR = os.path.join(PROJECT_ROOT, "data_raghu/")
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "plots_paper")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "plots_paper_new")
 
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -96,14 +106,17 @@ def pearson_r(field1, field2):
     return np.corrcoef(f1_flat[mask], f2_flat[mask])[0, 1]
 
 def k_to_ell(k, z, littleh=0.7):
-    """Convert k [h/Mpc] to multipole ell."""
-    omega_m0 = 0.27
-    omega_l0 = 0.73
-    def E(zp):
-        return np.sqrt(omega_m0 * (1+zp)**3 + omega_l0)
-    chi, _ = quad(lambda zp: 1.0/E(zp), 0, z)
-    chi *= 3000.0 / littleh  # c/H0 in Mpc/h
-    return k * chi
+    """Convert k [h/Mpc] to multipole ℓ via the Limber identity ℓ = k · χ.
+
+    Delegates to ksz_core.cosmology.k_to_ell, which enforces consistent units
+    (k in h/Mpc, χ in Mpc/h). The old local implementation here used χ in Mpc
+    and was missing a factor of h — see outputs/2026-05-22 daily log.
+    """
+    if littleh == 0.7:
+        c = _PAPER_COSMO
+    else:
+        c = _KSZ_Constants(H0=100.0 * littleh, Om0=0.27, Ob0=0.044, h=littleh)
+    return _ksz_k_to_ell(k, z, c)
 
 
 # ============================================================================
@@ -1672,19 +1685,21 @@ def plot_velocity_term_comparison(z, output_dir=OUTPUT_DIR):
 
 
 def plot_velocity_scatter_comparison(z1, z2, output_dir=OUTPUT_DIR):
-    """Create 4-panel figure comparing 3D and 2D velocity scatter at two redshifts.
-    
-    Top row: 3D velocity scatter plots
-    Bottom row: 2D projected velocity scatter plots
-    
+    """Create 6-panel figure (3 rows × 2 redshifts).
+
+    Row 1: 3D velocity scatter (reconstructed vs true v_z, voxel-by-voxel)
+    Row 2: 2D projected velocity scatter (LOS-summed v_z)
+    Row 3: 2D kSZ scatter (true vs reconstructed kSZ pixel-by-pixel)
+           — added 2026-05-25 per Saleem's request
+
     NORMALIZATION:
     -------------
-    We only shift the mean (intercept) to align the data, NOT the slope.
-    This preserves the true amplitude relationship while centering the data.
-    
-    Additionally, we compare:
-    - Standard: project first, then compare
-    - Pre-normalized: normalize δTb in 3D before projection
+    Velocity panels (rows 1-2): only shift the mean (intercept) to align the
+    data, NOT the slope. Preserves true amplitude. δTb-based reconstruction
+    can additionally be pre-normalized (std-matched to true vz) before projection.
+
+    kSZ panel (row 3): kSZ maps already encode the v×x_e×(1+δ) physics, so
+    no separate normalization — just raw scatter.
     """
     print("\n" + "="*80)
     print(f"Plotting: Velocity Scatter Comparison (z={z1:.3f}, z={z2:.3f})")
@@ -1700,16 +1715,28 @@ def plot_velocity_scatter_comparison(z1, z2, output_dir=OUTPUT_DIR):
         return float(r), float(rmse)
     
     def load_and_process(z):
-        (den, xhi, vx, vy, vz, vx_rec, vy_rec, vz_rec, 
+        (den, xhi, vx, vy, vz, vx_rec, vy_rec, vz_rec,
          vx_recx, vy_recx, vz_recx, _, _, _, _, _) = reconstruct_velocities(z)
-        
+
         # Crop to central region
+        den_c = den[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
         xhi = xhi[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
         vz = vz[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
         vz_recx = vz_recx[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
         vz_rec = vz_rec[CENTRAL_CROP, CENTRAL_CROP, LOS_CROP]
-        
+
         mean_xHI = xhi.mean()
+
+        # ─── kSZ maps: true vs reconstructed (paper-relevant: δTb-based) ──
+        # compute_ksz_maps integrates v × x_e × (1+δ) along LOS → 2D map.
+        # Paper kSZ convention (see plot_true_vs_reconstructed_ksz_maps L2956
+        # and analyze_stitched_full_ksz_vs_individual L2390): use vz_recx
+        # directly, no sign flip. The minus sign in rows 1-2's velocity
+        # scatter is a separate display convention for the "−δT_b" overlay.
+        ksz_true_2d_map = compute_ksz_maps(vz, xhi, den_c, z=z,
+                                            physical_norm=PHYSICAL_NORM)
+        ksz_rec_2d_map  = compute_ksz_maps(vz_recx, xhi, den_c, z=z,
+                                            physical_norm=PHYSICAL_NORM)
         
         # Exclude boundaries for 3D data (10 cells on each side along LOS)
         boundary = 10
@@ -1752,24 +1779,29 @@ def plot_velocity_scatter_comparison(z1, z2, output_dir=OUTPUT_DIR):
         vz_recx_prenorm_2d_map = np.sum(vz_recx_prenorm_full, axis=2)
         vz_recx_prenorm_2d = vz_recx_prenorm_2d_map[boundary:-boundary, boundary:-boundary].flatten()
         
+        # kSZ scatter inputs — exclude boundary cells for consistency
+        ksz_true_2d = ksz_true_2d_map[boundary:-boundary, boundary:-boundary].flatten()
+        ksz_rec_2d  = ksz_rec_2d_map[boundary:-boundary, boundary:-boundary].flatten()
+
         # Clean up
-        del den, xhi, vz, vz_recx, vz_rec
+        del den, den_c, xhi, vz, vz_recx, vz_rec, ksz_true_2d_map, ksz_rec_2d_map
         gc.collect()
-        
+
         return {
             'mean_xHI': mean_xHI, 'z': z,
             'vz_3d': vz_3d, 'vz_rec_3d': vz_rec_3d, 'vz_recx_3d': vz_recx_3d,
             'vz_2d': vz_2d, 'vz_rec_2d': vz_rec_2d, 'vz_recx_2d': vz_recx_2d,
             'vz_recx_prenorm_2d': vz_recx_prenorm_2d,
-            'scale_factor': scale_factor
+            'scale_factor': scale_factor,
+            'ksz_true_2d': ksz_true_2d, 'ksz_rec_2d': ksz_rec_2d,
         }
     
     # Load data for both redshifts
     data1 = load_and_process(z1)
     data2 = load_and_process(z2)
     
-    # Create 2x2 figure - paper format
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    # 3 rows × 2 redshifts: row 0 = 3D vel, row 1 = 2D proj vel, row 2 = kSZ (NEW)
+    fig, axes = plt.subplots(3, 2, figsize=(14, 18))
     
     # More points for 3D to show density better
     sample_3d = 150000
@@ -1871,9 +1903,41 @@ def plot_velocity_scatter_comparison(z1, z2, output_dir=OUTPUT_DIR):
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
         
+        # =====================================================================
+        # Row 3 (NEW, Saleem 2026-05-25): true vs reconstructed kSZ scatter
+        # =====================================================================
+        ax = axes[2, col]
+        ksz_true = data['ksz_true_2d']
+        ksz_rec  = data['ksz_rec_2d']
+        n_ksz = len(ksz_true)
+        idx_ksz = np.random.choice(n_ksz, min(sample_2d, n_ksz), replace=False)
+
+        r_ksz, rmse_ksz = compute_metrics(ksz_true, ksz_rec)
+
+        ax.scatter(ksz_rec[idx_ksz], ksz_true[idx_ksz],
+                   alpha=0.3, s=1, c='#1F8A4A', rasterized=True,
+                   label=r'kSZ')
+
+        # symmetric limits on true kSZ
+        lim_ksz = np.nanpercentile(ksz_true, [0.5, 99.5])
+        ax.plot([lim_ksz[0], lim_ksz[1]], [lim_ksz[0], lim_ksz[1]],
+                'k--', linewidth=2, alpha=0.8)
+
+        ksz_unit = "[µK]" if PHYSICAL_NORM else "[a.u.]"
+        ax.set_xlabel(f'Reconstructed kSZ {ksz_unit}', fontsize=20)
+        ax.set_ylabel(f'True kSZ {ksz_unit}', fontsize=20)
+        ax.set_title(f'kSZ: z={z:.2f}, $\\langle x_{{HI}} \\rangle$={mean_xHI:.2f}  '
+                     f'(r={r_ksz:+.3f})', fontsize=20)
+        ax.tick_params(axis='both', which='major', labelsize=18)
+        ax.set_xlim(lim_ksz)
+        ax.set_ylim(lim_ksz)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+
         # Print metrics for reference
         print(f"  z={z:.2f}: 3D r(δ)={r_unfilt_3d:.3f}, r(δTb)={r_filt_3d:.3f}")
         print(f"          2D r(δ)={r_unfilt_2d:.3f}, r(δTb)={r_filt_2d:.3f}, r(δTb pre-norm)={r_prenorm_2d:.3f}")
+        print(f"          kSZ r={r_ksz:+.4f}, RMSE={rmse_ksz:.3e}")
         print(f"          3D scale factor: {data['scale_factor']:.4f}")
     
     plt.tight_layout()
@@ -3225,11 +3289,17 @@ def run_21cmfast_chunked_reconstruction(sim_id=12701, chunk_size=200,
 
 
 def comoving_distance(z, H0=70, Om=0.27):
-    """Compute comoving distance in Mpc/h."""
-    c = 299792.458  # km/s
-    integrand = lambda zp: 1.0 / np.sqrt(Om*(1+zp)**3 + (1-Om))
-    result, _ = quad(integrand, 0, z)
-    return c / H0 * result
+    """Comoving distance to redshift z, in **Mpc/h** (h-unit convention).
+
+    Delegates to ksz_core.cosmology.chi_mpch. Use Mpc/h so that pairing with
+    k in h/Mpc gives dimensionally-correct ℓ = k · χ. The old local body
+    here returned Mpc and silently dropped an h factor at every call site.
+    """
+    if H0 == 70 and Om == 0.27:
+        c = _PAPER_COSMO
+    else:
+        c = _KSZ_Constants(H0=H0, Om0=Om, Ob0=0.044, h=H0 / 100.0)
+    return _ksz_chi_mpch(z, c)
 
 
 def plot_ksz_scale_dependence_and_ell3000(all_results, output_dir=OUTPUT_DIR):

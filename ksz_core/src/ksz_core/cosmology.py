@@ -64,23 +64,39 @@ def f_growth(z: float | np.ndarray, c: Constants = Constants()) -> float | np.nd
 
 
 def comoving_distance(z: float, c: Constants = Constants()) -> float:
-    """Comoving distance from z=0 to z, in Mpc. Flat ΛCDM."""
+    """Comoving distance from z=0 to z, in Mpc. Flat ΛCDM.
+
+    Returns χ in **physical Mpc** (not Mpc/h). Use `chi_mpch` if you need the
+    h-unit numerical value (e.g. when pairing with k in h/Mpc for ℓ = k·χ).
+    """
     if z == 0.0:
         return 0.0
     chi, _ = quad(lambda zp: C_LIGHT_KMS / H(zp, c), 0.0, z)
     return chi
 
 
+def chi_mpch(z: float, c: Constants = Constants()) -> float:
+    """Comoving distance from z=0 to z, in Mpc/h. Flat ΛCDM.
+
+    Convenience over `comoving_distance(z, c)` for the h-unit convention
+    used by `k_to_ell` and most reionisation/CMB pipelines (where k is in
+    h/Mpc). Numerically: ``chi_mpch = c.h * comoving_distance(z, c)``.
+    """
+    return c.h * comoving_distance(z, c)
+
+
 def k_to_ell(k: float | np.ndarray, z: float,
              c: Constants = Constants()) -> float | np.ndarray:
     """Convert wavenumber k [h/Mpc] at redshift z to multipole ℓ.
 
-    ℓ = k · χ(z), with k in h/Mpc and χ in Mpc/h. Internally `comoving_distance`
-    returns χ in Mpc, so we multiply by h to get Mpc/h before forming the product.
+    Implements the standard Limber identity ℓ = k · χ with **consistent units**:
+    k in h/Mpc paired with χ in Mpc/h gives dimensionless ℓ. See Dodelson,
+    *Modern Cosmology* 2nd ed., eq. 11.66 (Limber approximation).
+
+    Common mistake: mixing k [h/Mpc] with χ [Mpc] introduces a spurious
+    factor of h. `chi_mpch` does the conversion explicitly.
     """
-    chi_mpc = comoving_distance(z, c)
-    chi_mpch = chi_mpc * c.h
-    return k * chi_mpch
+    return k * chi_mpch(z, c)
 
 
 # ─── Optical depth ─────────────────────────────────────────────────────────
